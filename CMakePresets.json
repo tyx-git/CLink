@@ -1,0 +1,48 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CVPN_ENABLE_TESTS": "ON",
+        "CMAKE_CXX_CLANG_TIDY": "",
+        "CMAKE_C_COMPILER": "D:/Software/Language/mingw64/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "D:/Software/Language/mingw64/bin/g++.exe",
+        "CATCH_ENABLE_COVERAGE": "OFF",
+        "CATCH_CONFIG_FAST_COMPILE": "ON",
+        "CMAKE_CXX_FLAGS": ""
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CLINK_ENABLE_TESTS": "OFF",
+        "CLINK_WARNINGS_AS_ERRORS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": { "verbosity": "default" }
+    }
+  ]
+}

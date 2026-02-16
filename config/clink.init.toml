@@ -1,0 +1,58 @@
+[service]
+role = "service"
+data_dir = "${CLINK_DATA_DIR}"  # override via environment
+
+[network]
+listen = "tls://0.0.0.0:4433"
+bandwidth_limit = 10240  # 10 KB/s for testing rate limiting
+
+[security]
+credential_provider = "psk"
+acl_file = "config/acl.toml"
+
+[observability]
+log_level = "info"
+metrics_endpoint = "localhost:9100"
+
+[logging]
+level = "info"
+format = "simple"
+pattern = "%Y-%m-%d %H:%M:%S.%e [%n] [%l] %v"
+async = true
+queue_size = 8192
+flush_interval = 3
+
+[auth]
+psk_list = ["admin:AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAA4CF8PNDkO0WHzf0q2J69zwAAAAAeAAAAQwBMAGkAbgBrACAAUwBlAGMAdQByAGkAdAB5AAAAEGYAAAABAAAgAAAA14dtsN2TEHHHwpvQoXd8itD/+Q1/ZDA/AdmwVzE8tMgAAAAADoAAAAACAAAgAAAAWPdDhc60sCtR21rH9ajl5hnjzp7N2pI+dTVw/8hfM/YgAAAAy1MdyPbHQtpyn7TlE4MNBCqzEWaLrqfuLGsU84SrCBFAAAAAkl94EFM/wFkZR1Yl9VXutwN6FoZHHsqEK7Hl7tMqI0QUaE5WvdtpMwBWzRFm0DWkuHHS2xFFmgp5Ns7a0yYQuw==", "user1:AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAA4CF8PNDkO0WHzf0q2J69zwAAAAAeAAAAQwBMAGkAbgBrACAAUwBlAGMAdQByAGkAdAB5AAAAEGYAAAABAAAgAAAASgqIjrAE0A4K0JpiJAe51d2ElnVsPDgRGtl5OuvOgy0AAAAADoAAAAACAAAgAAAASXfAApSeV5TC/XdBdCWvXO1K/2RaMOzOZaOgSDQ/ZxYgAAAAbr2me85xuqhGpUOotXit5tnp70XVvTcECox9kdcLI+lAAAAAOwbttEYGWpYoVpkQYxknL8pckjQF59oeUVi6HQ4/mZ5IKovaTyC8vnWVC8o+xlSek8h0illLn/8XhRzcqg0QMA=="]
+
+[client]
+remote_endpoint = "tls://127.0.0.1:4433"
+
+[policy.global]
+max_bandwidth_up = 104857600  # 100 Mbps
+max_bandwidth_down = 104857600
+session_timeout = 3600
+allow_split_tunneling = true
+allowed_subnets = ["0.0.0.0/0"]
+
+[policy.groups.vip]
+max_bandwidth_up = 1073741824  # 1 Gbps
+max_bandwidth_down = 1073741824
+
+[policy.devices.device-001]
+max_bandwidth_up = 209715200   # 200 Mbps
+allow_split_tunneling = false
+
+[[logging.sinks]]
+type = "console"
+enabled = true
+level = "trace"
+
+[[logging.sinks]]
+type = "rotating"
+enabled = true
+level = "trace"
+path = "logs/clink-daemon.log"
+max_size = "10MB"
+max_files = 5
+rotation_time = "daily"
