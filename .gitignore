@@ -1,0 +1,35 @@
+﻿# Build output
+/build/
+/build-*/*
+CMakeCache.txt
+CMakeFiles/
+install/
+compile_commands.json
+Testing/
+external/catch*/
+external/openssl*/
+external/spdlog*/
+
+# IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Logs
+logs/
+*.log
+AGENTS.md
+todo*.md
+todo.md
+Out/
+test/
+config/certs/
+scripts/
+dosc/
+
+# Misc
+.DS_Store
+Thumbs.db
+
+give.txt
+require.txt
