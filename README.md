@@ -4,11 +4,14 @@
 **Date**: 2026-02-16  
 **Version**: v1.1.0
 
-**CLink** is a modern, high-performance VPN and network tunneling tool written in C++20. It provides secure, reliable, and efficient network connectivity using advanced transport protocols and userspace networking.
+**CLink** is a modern, high-performance network tunneling and intranet penetration tool written in C++20. It utilizes advanced virtual networking (TUN/TAP) to provide secure, reliable, and efficient connectivity, enabling seamless access to intranet resources from anywhere.
+
+While technically a Layer 3 VPN (Virtual Private Network) that constructs a secure overlay network, CLink is designed with the simplicity and flexibility required for modern intranet penetration and mesh networking scenarios.
 
 ## 🚀 Key Features
 
-*   **Secure Transport**: Built-in TLS 1.3 support for end-to-end encryption.
+*   **Intranet Penetration & Access**: Easily expose or access internal services across NAT/Firewalls without complex port forwarding.
+*   **Secure Tunneling**: Built-in TLS 1.3 support for end-to-end encryption.
 *   **Reliability Layer**: Custom reliability engine ensuring data delivery over unstable networks (ACK, Retransmission, Flow Control).
 *   **Cross-Platform**: Supports Windows (Wintun/TAP) and Linux (TUN/TAP).
 *   **Modern C++**: Built with C++20, utilizing `asio` for high-concurrency asynchronous I/O.
@@ -57,7 +60,7 @@ CLink consists of a background service (`clink-service`) and a command-line inte
 ### Starting the Server
 
 ```bash
-./Out/clink-service --config config/cvpn.sample.toml
+./Out/clink-service --config config/clink.sample.toml
 ```
 
 ### Client Connection
