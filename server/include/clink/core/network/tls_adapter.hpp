@@ -9,6 +9,8 @@
 #include <asio/ssl.hpp>
 #include <atomic>
 #include <deque>
+#include <variant>
+#include "clink/core/memory/buffer_pool.hpp"
 
 namespace clink::core::network {
 
@@ -33,7 +35,9 @@ public:
     std::error_code start(const std::string& endpoint) override;
     void stop() override;
     std::error_code send(const uint8_t* data, size_t size) override;
+    std::error_code send(const Packet& packet) override;
     void on_receive(ReceiveCallback callback) override { receive_callback_ = std::move(callback); }
+    void on_receive(ZeroCopyReceiveCallback callback) override { zero_copy_callback_ = std::move(callback); }
     bool is_connected() const noexcept override;
     std::string_view remote_endpoint() const noexcept override { return remote_endpoint_; }
 
@@ -57,6 +61,7 @@ private:
     std::shared_ptr<logging::Logger> logger_;
     std::string remote_endpoint_;
     ReceiveCallback receive_callback_;
+    ZeroCopyReceiveCallback zero_copy_callback_;
     std::atomic<bool> running_{false};
     
     std::string ca_cert_path_;
@@ -67,7 +72,9 @@ private:
     std::shared_ptr<asio::ssl::context> ssl_ctx_;
     std::unique_ptr<asio::ssl::stream<asio::ip::tcp::socket>> stream_;
     std::vector<uint8_t> receive_buffer_;
-    std::deque<std::vector<uint8_t>> write_queue_;
+    std::shared_ptr<clink::core::memory::Block> zero_copy_buffer_;
+    using WriteItem = std::variant<std::vector<uint8_t>, Packet>;
+    std::deque<WriteItem> write_queue_;
     std::atomic<bool> handshake_complete_{false};
 };
 

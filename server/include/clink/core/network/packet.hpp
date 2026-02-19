@@ -5,6 +5,8 @@
 #include <memory>
 #include <chrono>
 #include <cstring>
+#include "clink/core/memory/buffer_pool.hpp"
+#include <asio/buffer.hpp>
 
 namespace clink::core::network {
 
@@ -39,17 +41,44 @@ struct PacketHeader {
  */
 struct Packet {
     PacketHeader header{}; // Zero-initialize header
-    std::vector<uint8_t> payload;
+    
+    // Zero-copy payload buffer
+    std::shared_ptr<clink::core::memory::Block> block;
+    size_t offset = 0; // Offset relative to block->begin()
 
     Packet() {
         std::memset(&header, 0, sizeof(header));
     }
 
-    // 辅助方法：序列化
+    // Initialize with a block
+    explicit Packet(std::shared_ptr<clink::core::memory::Block> b, size_t off = 0) 
+        : block(std::move(b)), offset(off) {
+         std::memset(&header, 0, sizeof(header));
+         if (block) {
+             // Ensure offset is valid?
+             header.payload_size = static_cast<uint16_t>(block->size() > offset ? block->size() - offset : 0);
+         }
+    }
+
+    // 辅助方法：序列化 (Legacy copy)
     std::vector<uint8_t> serialize() const;
     
-    // 辅助方法：反序列化
+    // 辅助方法：零拷贝序列化
+    std::vector<asio::const_buffer> serialize_to_buffers() const;
+    
+    // 辅助方法：反序列化 (Legacy copy)
     static std::unique_ptr<Packet> deserialize(const uint8_t* data, size_t size);
+
+    // 辅助方法：零拷贝反序列化
+    static std::unique_ptr<Packet> deserialize(std::shared_ptr<clink::core::memory::Block> block);
+    
+    // Accessors for payload
+    uint8_t* payload_data() { return block ? block->begin() + offset : nullptr; }
+    const uint8_t* payload_data() const { return block ? block->begin() + offset : nullptr; }
+    size_t payload_size() const { return header.payload_size; }
+    
+    // Legacy support for vector-like access (use with caution)
+    // std::vector<uint8_t>& payload; // Cannot provide reference to non-existent member
 };
 
 /**
