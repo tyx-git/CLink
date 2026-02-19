@@ -116,7 +116,25 @@ std::error_code TlsTransportAdapter::send(const uint8_t* data, size_t size) {
     
     asio::post(strand_, [this, self, buffer = std::move(buffer)]() mutable {
         bool write_in_progress = !write_queue_.empty();
-        write_queue_.push_back(std::move(buffer));
+        write_queue_.emplace_back(std::move(buffer));
+        if (!write_in_progress && handshake_complete_) {
+            do_write();
+        }
+    });
+    
+    return {};
+}
+
+std::error_code TlsTransportAdapter::send(const Packet& packet) {
+    if (!running_) return std::make_error_code(std::errc::not_connected);
+    
+    // Make a copy of the packet (shares the block)
+    Packet pkt_copy = packet;
+    auto self = shared_from_this();
+    
+    asio::post(strand_, [this, self, pkt = std::move(pkt_copy)]() mutable {
+        bool write_in_progress = !write_queue_.empty();
+        write_queue_.emplace_back(std::move(pkt));
         if (!write_in_progress && handshake_complete_) {
             do_write();
         }
@@ -127,19 +145,27 @@ std::error_code TlsTransportAdapter::send(const uint8_t* data, size_t size) {
 
 void TlsTransportAdapter::do_write() {
     auto self = shared_from_this();
-    asio::async_write(*stream_,
-        asio::buffer(write_queue_.front()),
-        asio::bind_executor(strand_, [this, self](std::error_code ec, std::size_t /*length*/) {
-            if (!ec) {
-                write_queue_.pop_front();
-                if (!write_queue_.empty()) {
-                    do_write();
-                }
-            } else if (ec != asio::error::operation_aborted) {
-                if (logger_) logger_->error("[tls] send failed: " + ec.message());
-                stop();
+    
+    auto write_handler = [this, self](std::error_code ec, std::size_t /*length*/) {
+        if (!ec) {
+            write_queue_.pop_front();
+            if (!write_queue_.empty()) {
+                do_write();
             }
-        }));
+        } else if (ec != asio::error::operation_aborted) {
+            if (logger_) logger_->error("[tls] send failed: " + ec.message());
+            stop();
+        }
+    };
+
+    if (std::holds_alternative<Packet>(write_queue_.front())) {
+        const auto& pkt = std::get<Packet>(write_queue_.front());
+        // serialize_to_buffers returns vector of const_buffer, which is copyable and valid as long as pkt is alive
+        asio::async_write(*stream_, pkt.serialize_to_buffers(), asio::bind_executor(strand_, write_handler));
+    } else {
+        const auto& data = std::get<std::vector<uint8_t>>(write_queue_.front());
+        asio::async_write(*stream_, asio::buffer(data), asio::bind_executor(strand_, write_handler));
+    }
 }
 
 bool TlsTransportAdapter::is_connected() const noexcept {
@@ -166,15 +192,21 @@ void TlsTransportAdapter::do_handshake() {
 
 void TlsTransportAdapter::do_receive() {
     auto self = shared_from_this();
-    stream_->async_read_some(asio::buffer(receive_buffer_),
-        asio::bind_executor(strand_, [this, self](std::error_code ec, std::size_t length) {
+
+    // Always use BufferPool for receiving to support zero-copy
+    auto block = clink::core::memory::BufferPool::instance()->acquire(8192);
+
+    stream_->async_read_some(asio::buffer(block->write_ptr(), block->tailroom()),
+        asio::bind_executor(strand_, [this, self, block](std::error_code ec, std::size_t length) {
             if (!ec) {
-                // if (logger_) logger_->info("[tls] received " + std::to_string(length) + " bytes");
-                if (receive_callback_) {
-                    receive_callback_(receive_buffer_.data(), length);
-                } else {
-                    if (logger_) logger_->warn("[tls] received data but no callback set");
+                block->commit(length);
+
+                if (zero_copy_callback_) {
+                    zero_copy_callback_(block);
+                } else if (receive_callback_) {
+                    receive_callback_(block->begin(), length);
                 }
+                
                 do_receive();
             } else if (ec != asio::error::operation_aborted) {
                 if (logger_) {

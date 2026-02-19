@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <cstdint>
+#include "clink/core/memory/buffer_pool.hpp"
 
 namespace clink::core::network {
 
@@ -34,16 +35,23 @@ public:
 
     /**
      * @brief 异步读取一个原始数据包 (IP Packet)
-     * @param buffer 目标缓冲区
+     * @param buffer 目标缓冲区 (Block)
      * @param callback 读取完成后的回调
      */
-    virtual void async_read_packet(std::vector<uint8_t>& buffer, 
+    virtual void async_read_packet(std::shared_ptr<clink::core::memory::Block> buffer, 
                                    std::function<void(std::error_code, size_t)> callback) = 0;
 
     /**
      * @brief 写入一个原始数据包 (IP Packet)
      */
     virtual std::error_code write_packet(const uint8_t* data, size_t size) = 0;
+
+    /**
+     * @brief 写入一个原始数据包 (Block)
+     */
+    virtual std::error_code write_packet(const clink::core::memory::Block& block) {
+        return write_packet(block.begin(), block.size());
+    }
 
     /**
      * @brief 获取接口 MTU

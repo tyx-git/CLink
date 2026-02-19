@@ -68,6 +68,7 @@ add_library(clink-client-core STATIC
     ../client/src/modules/registry.cpp
     ../client/src/ipc.cpp
     ../server/src/network/tls_adapter.cpp
+    ../server/src/network/packet.cpp
 )
 
 target_include_directories(clink-client-core PUBLIC 

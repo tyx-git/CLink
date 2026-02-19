@@ -47,11 +47,11 @@ void ReliabilityEngine::start_timer() {
                 }
                 
                 if (can_send) {
-                    auto raw_data = entry.packet->serialize();
-                    if (self->rate_limiter_ && self->rate_limiter_->consume(raw_data.size())) {
+                    size_t packet_size = sizeof(PacketHeader) + entry.packet->header.payload_size;
+                    if (self->rate_limiter_ && self->rate_limiter_->consume(packet_size)) {
                         entry.sent = true;
                         entry.last_send_time = now;
-                        if (self->send_fn_) self->send_fn_(raw_data);
+                        if (self->send_fn_) self->send_fn_(*entry.packet);
                         continue;
                     }
                 }
@@ -66,8 +66,8 @@ void ReliabilityEngine::start_timer() {
                     continue;
                 }
 
-                auto raw_data = entry.packet->serialize();
-                if (self->rate_limiter_ && !self->rate_limiter_->consume(raw_data.size())) continue;
+                size_t packet_size = sizeof(PacketHeader) + entry.packet->header.payload_size;
+                if (self->rate_limiter_ && !self->rate_limiter_->consume(packet_size)) continue;
 
                 entry.retry_count++;
                 {
@@ -80,7 +80,7 @@ void ReliabilityEngine::start_timer() {
                 entry.last_send_time = std::chrono::steady_clock::now();
 
                 if (self->logger_) self->logger_->warn("[reliability] retransmitting seq " + std::to_string(seq));
-                if (self->send_fn_) self->send_fn_(raw_data);
+                if (self->send_fn_) self->send_fn_(*entry.packet);
             }
         }
 
@@ -94,29 +94,29 @@ void ReliabilityEngine::set_rate_limit(size_t bytes_per_second, size_t burst_siz
     }
 }
 
-void ReliabilityEngine::send_reliable(PacketType type, std::vector<uint8_t> payload) {
-    auto packet = std::make_unique<Packet>();
+void ReliabilityEngine::send_reliable(PacketType type, std::shared_ptr<clink::core::memory::Block> payload) {
+    auto packet = std::make_unique<Packet>(payload);
     packet->header.type = static_cast<uint8_t>(type);
     packet->header.flags = 0;
-    packet->header.payload_size = static_cast<uint16_t>(payload.size());
+    // payload_size is set by Packet constructor
     packet->header.seq_num = next_seq_num_++;
     packet->header.ack_num = last_received_seq_.load();
-    packet->payload = std::move(payload);
 
-    auto raw_data = packet->serialize();
+    size_t packet_size = sizeof(PacketHeader) + packet->header.payload_size;
     
     uint32_t seq = 0;
     bool can_send_now = false;
+    Packet packet_copy;
+
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         RetransmissionEntry entry;
-        entry.packet = std::move(packet);
         entry.last_send_time = std::chrono::steady_clock::now();
         entry.current_timeout = initial_rto_;
         entry.retry_count = 0;
         entry.sent = false;
         
-        seq = entry.packet->header.seq_num;
+        seq = packet->header.seq_num;
         
         {
             std::lock_guard<std::mutex> stats_lock(stats_mutex_);
@@ -126,18 +126,23 @@ void ReliabilityEngine::send_reliable(PacketType type, std::vector<uint8_t> payl
             }
         }
         
+        if (can_send_now) {
+            packet_copy = *packet;
+        }
+        entry.packet = std::move(packet);
+        
         unacked_packets_[seq] = std::move(entry);
     }
 
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.total_sent++;
-        stats_.bytes_sent += raw_data.size();
+        stats_.bytes_sent += packet_size;
     }
 
     if (can_send_now && send_fn_) {
-        if (rate_limiter_ && rate_limiter_->consume(raw_data.size())) {
-            send_fn_(raw_data);
+        if (rate_limiter_ && rate_limiter_->consume(packet_size)) {
+            send_fn_(packet_copy);
         } else {
             std::lock_guard<std::mutex> lock(queue_mutex_);
             if (unacked_packets_.count(seq)) {
@@ -156,8 +161,7 @@ void ReliabilityEngine::process_ack(uint32_t ack_num) {
         if (dup_ack_count_ == fast_retransmit_threshold_) {
             auto it = unacked_packets_.find(ack_num + 1);
             if (it != unacked_packets_.end()) {
-                auto raw_data = it->second.packet->serialize();
-                if (send_fn_) send_fn_(raw_data);
+                if (send_fn_) send_fn_(*it->second.packet);
                 
                 std::lock_guard<std::mutex> stats_lock(stats_mutex_);
                 stats_.ssthresh = std::max(2u, stats_.cwnd / 2);
@@ -238,8 +242,7 @@ void ReliabilityEngine::process_sack(const std::vector<std::pair<uint32_t, uint3
             if (seq < max_sacked_seq) {
                 entry.sack_count++;
                 if (entry.sack_count == fast_retransmit_threshold_) {
-                    auto raw_data = entry.packet->serialize();
-                    if (send_fn_) send_fn_(raw_data);
+                    if (send_fn_) send_fn_(*entry.packet);
                     
                     std::lock_guard<std::mutex> stats_lock(stats_mutex_);
                     stats_.retransmission_count++;
@@ -313,12 +316,11 @@ void ReliabilityEngine::send_ack() {
     packet.header.ack_num = last_received_seq_;
     // Pure ACK usually doesn't need seq_num, or can use 0.
     
-    auto raw = packet.serialize();
-    if (send_fn_) send_fn_(raw);
+    if (send_fn_) send_fn_(packet);
 
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_.total_sent++;
-    stats_.bytes_sent += raw.size();
+    stats_.bytes_sent += sizeof(PacketHeader);
 }
 
 } // namespace clink::core::network

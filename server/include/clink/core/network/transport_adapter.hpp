@@ -5,6 +5,8 @@
 #include <vector>
 #include <functional>
 #include <system_error>
+#include "clink/core/memory/buffer_pool.hpp"
+#include "clink/core/network/packet.hpp"
 
 namespace clink::core::network {
 
@@ -39,10 +41,36 @@ public:
     virtual std::error_code send(const uint8_t* data, size_t size) = 0;
 
     /**
-     * @brief 设置接收回调
+     * @brief 发送零拷贝数据包
+     * @param packet 数据包对象
+     */
+    virtual std::error_code send(const Packet& packet) {
+        // Default fallback to copying
+        auto buffers = packet.serialize_to_buffers();
+        std::vector<uint8_t> temp_buffer;
+        size_t total_size = 0;
+        for (const auto& buf : buffers) {
+            total_size += buf.size();
+        }
+        temp_buffer.reserve(total_size);
+        for (const auto& buf : buffers) {
+            const uint8_t* p = static_cast<const uint8_t*>(buf.data());
+            temp_buffer.insert(temp_buffer.end(), p, p + buf.size());
+        }
+        return send(temp_buffer.data(), temp_buffer.size());
+    }
+
+    /**
+     * @brief 设置接收回调 (Legacy)
      */
     using ReceiveCallback = std::function<void(const uint8_t* data, size_t size)>;
     virtual void on_receive(ReceiveCallback callback) = 0;
+
+    /**
+     * @brief 设置零拷贝接收回调
+     */
+    using ZeroCopyReceiveCallback = std::function<void(std::shared_ptr<clink::core::memory::Block> block)>;
+    virtual void on_receive(ZeroCopyReceiveCallback callback) = 0;
 
     /**
      * @brief 获取当前连接状态

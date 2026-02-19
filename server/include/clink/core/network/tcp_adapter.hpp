@@ -7,6 +7,7 @@
 #include <string>
 #include <asio.hpp>
 #include <atomic>
+#include "clink/core/memory/buffer_pool.hpp"
 
 namespace clink::core::network {
 
@@ -29,7 +30,10 @@ public:
     std::error_code start(const std::string& endpoint) override;
     void stop() override;
     std::error_code send(const uint8_t* data, size_t size) override;
+    std::error_code send(const Packet& packet) override;
     void on_receive(ReceiveCallback callback) override;
+    void on_receive(ZeroCopyReceiveCallback callback) override;
+    
     bool is_connected() const noexcept override;
     std::string_view remote_endpoint() const noexcept override { return remote_endpoint_; }
 
@@ -39,6 +43,7 @@ private:
     asio::io_context& io_context_;
     std::shared_ptr<logging::Logger> logger_;
     ReceiveCallback receive_callback_;
+    ZeroCopyReceiveCallback zero_copy_receive_callback_;
     std::atomic<bool> running_{false};
     
     asio::ip::tcp::socket socket_;

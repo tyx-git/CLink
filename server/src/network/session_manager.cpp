@@ -51,10 +51,10 @@ std::error_code DefaultSessionManager::initialize() {
 void DefaultSessionManager::start_tun_read() {
     if (!running_) return;
 
-    // 使用一个共享的缓冲区进行异步读取
-    auto buffer = std::make_shared<std::vector<uint8_t>>(2000);
+    // 使用 BufferPool 分配缓冲区
+    auto buffer = memory::BufferPool::instance()->acquire(2000);
     auto self = weak_from_this();
-    virtual_interface_->async_read_packet(*buffer, [self, buffer](std::error_code ec, size_t size) {
+    virtual_interface_->async_read_packet(buffer, [self, buffer](std::error_code ec, size_t size) {
         auto this_ptr = std::dynamic_pointer_cast<DefaultSessionManager>(self.lock());
         if (!this_ptr || !this_ptr->running_) return;
 
@@ -71,7 +71,7 @@ void DefaultSessionManager::start_tun_read() {
             if (!this_ptr->engines_.empty()) {
                 // 演示：发送到第一个活跃会话
                 auto it = this_ptr->engines_.begin();
-                it->second->send_reliable(PacketType::Data, std::move(*buffer));
+                it->second->send_reliable(PacketType::Data, buffer);
             }
         }
 
@@ -168,8 +168,8 @@ void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
     }
 
     // 初始化可靠传输引擎
-    auto engine = std::make_shared<ReliabilityEngine>(io_context_, logger_, [adapter](const std::vector<uint8_t>& data) {
-            adapter->send(data.data(), data.size());
+    auto engine = std::make_shared<ReliabilityEngine>(io_context_, logger_, [adapter](const Packet& packet) {
+            adapter->send(packet);
         });
         
     if (default_bytes_per_second_ > 0) {
@@ -185,63 +185,55 @@ void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
 
     // 绑定异步接收回调，取代之前的阻塞线程
     auto self = weak_from_this();
-    adapter->on_receive([self, session_id, adapter](const uint8_t* data, size_t size) {
+    adapter->on_receive([self, session_id, adapter](std::shared_ptr<memory::Block> block) {
         auto this_ptr = std::dynamic_pointer_cast<DefaultSessionManager>(self.lock());
         if (!this_ptr || !this_ptr->running_) return;
 
         auto tracer = observability::Telemetry::get_tracer("clink-data");
         observability::ScopedSpan span(tracer->start_span("network_to_tun"));
         
-        // 反序列化数据包
-        auto packet = Packet::deserialize(data, size);
+        // 反序列化数据包 (Zero-Copy)
+        auto packet = Packet::deserialize(block);
         if (!packet) {
-            if (this_ptr->logger_) this_ptr->logger_->warn("[session] received invalid packet from " + session_id);
+            // Note: If TCP stream fragmentation occurs, this might drop data. 
+            // Framing logic should be implemented in TransportAdapter or here.
+            if (this_ptr->logger_) this_ptr->logger_->warn("[session] received invalid or incomplete packet from " + session_id);
+            return;
+        }
+        
+        // Verify checksum if enabled (optional)
+        // ...
+
+        {
+            std::shared_lock lock(this_ptr->sessions_mutex_);
+            auto it = this_ptr->sessions_.find(session_id);
+            if (it != this_ptr->sessions_.end()) {
+                it->second.last_activity = std::chrono::system_clock::now();
+            }
+
+            // Update reliability engine and send ACK for Data packets
+            auto engine_it = this_ptr->engines_.find(session_id);
+            if (engine_it != this_ptr->engines_.end()) {
+                auto& engine = engine_it->second;
+                engine->set_last_received_seq(packet->header.seq_num);
+                
+                if (static_cast<PacketType>(packet->header.type) == PacketType::Data) {
+                    engine->send_ack();
+                }
+            }
+        }
+
+        // 处理心跳包
+        if (static_cast<PacketType>(packet->header.type) == PacketType::Heartbeat) {
+            if (this_ptr->logger_) this_ptr->logger_->trace("[session] received heartbeat from " + session_id);
             return;
         }
 
-        std::shared_ptr<ReliabilityEngine> engine;
-        {
-            std::shared_lock lock(this_ptr->sessions_mutex_);
-            auto it = this_ptr->engines_.find(session_id);
-            if (it != this_ptr->engines_.end()) {
-                engine = it->second;
+        // 处理业务数据包
+        if (static_cast<PacketType>(packet->header.type) == PacketType::Data) {
+            if (this_ptr->virtual_interface_) {
+                this_ptr->virtual_interface_->write_packet(packet->payload_data(), packet->payload_size());
             }
-        }
-
-        if (!engine) return;
-
-        engine->process_ack(packet->header.ack_num);
-
-        PacketType type = static_cast<PacketType>(packet->header.type);
-        if (type == PacketType::Data) {
-            engine->set_last_received_seq(packet->header.seq_num);
-
-            // 回复 ACK/SACK
-            auto sack_blocks = engine->get_sack_blocks();
-            if (sack_blocks.empty()) {
-                engine->send_ack();
-            } else {
-                Packet sack_packet;
-                sack_packet.header.type = static_cast<uint8_t>(PacketType::Sack);
-                sack_packet.header.ack_num = packet->header.seq_num;
-                // ... 填充 SACK 载荷 (略，保持原有逻辑)
-                adapter->send(sack_packet.serialize().data(), sack_packet.serialize().size());
-            }
-
-            // 路由到 TUN
-            this_ptr->route_packet(packet->payload.data(), packet->payload.size());
-
-            engine->record_received_bytes(size);
-            
-            std::unique_lock lock(this_ptr->sessions_mutex_);
-            if (this_ptr->sessions_.count(session_id)) {
-                this_ptr->sessions_[session_id].last_activity = std::chrono::system_clock::now();
-            }
-        } else if (type == PacketType::Sack) {
-            // 解析 SACK 块并处理 (略)
-        } else if (type == PacketType::Heartbeat) {
-            engine->set_last_received_seq(packet->header.seq_num);
-            engine->send_ack();
         }
     });
 

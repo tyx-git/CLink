@@ -1,22 +1,35 @@
 #include "clink/core/network/packet.hpp"
 #include <cstring>
 #include <algorithm>
+#include <asio.hpp>
 
 namespace clink::core::network {
 
 std::vector<uint8_t> Packet::serialize() const {
     std::vector<uint8_t> result;
-    result.resize(sizeof(PacketHeader) + payload.size());
+    size_t p_size = header.payload_size;
+    result.resize(sizeof(PacketHeader) + p_size);
     
     PacketHeader* hdr = reinterpret_cast<PacketHeader*>(result.data());
     *hdr = header;
-    hdr->payload_size = static_cast<uint16_t>(payload.size());
+    hdr->payload_size = static_cast<uint16_t>(p_size);
     
-    if (!payload.empty()) {
-        std::memcpy(result.data() + sizeof(PacketHeader), payload.data(), payload.size());
+    if (p_size > 0 && block) {
+        std::memcpy(result.data() + sizeof(PacketHeader), block->begin() + offset, p_size);
     }
     
     return result;
+}
+
+std::vector<asio::const_buffer> Packet::serialize_to_buffers() const {
+    std::vector<asio::const_buffer> buffers;
+    // Note: This points to the member header, which must remain valid until write completes.
+    buffers.push_back(asio::buffer(&header, sizeof(PacketHeader)));
+    
+    if (block && header.payload_size > 0) {
+        buffers.push_back(asio::buffer(block->begin() + offset, header.payload_size));
+    }
+    return buffers;
 }
 
 std::unique_ptr<Packet> Packet::deserialize(const uint8_t* data, size_t size) {
@@ -30,9 +43,31 @@ std::unique_ptr<Packet> Packet::deserialize(const uint8_t* data, size_t size) {
         return nullptr;
     }
     
-    packet->payload.resize(packet->header.payload_size);
     if (packet->header.payload_size > 0) {
-        std::memcpy(packet->payload.data(), data + sizeof(PacketHeader), packet->header.payload_size);
+        packet->block = clink::core::memory::BufferPool::instance()->acquire(packet->header.payload_size);
+        packet->block->append(data + sizeof(PacketHeader), packet->header.payload_size);
+    }
+    
+    return packet;
+}
+
+std::unique_ptr<Packet> Packet::deserialize(std::shared_ptr<clink::core::memory::Block> block) {
+    if (!block || block->size() < sizeof(PacketHeader)) return nullptr;
+
+    auto packet = std::make_unique<Packet>();
+    // Assume header is at block->begin()
+    std::memcpy(&packet->header, block->begin(), sizeof(PacketHeader));
+    
+    // Validate payload size
+    if (packet->header.payload_size > block->size() - sizeof(PacketHeader)) {
+        // Incomplete packet in block
+        return nullptr;
+    }
+    
+    // Assign block and offset
+    if (packet->header.payload_size > 0) {
+        packet->block = block;
+        packet->offset = sizeof(PacketHeader); // Payload starts after header
     }
     
     return packet;
