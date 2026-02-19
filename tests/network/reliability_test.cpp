@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include "clink/core/network/reliability_engine.hpp"
 #include "clink/core/network/packet.hpp"
+#include "clink/core/memory/buffer_pool.hpp"
 #include <iostream>
 #include <vector>
 #include <memory>
@@ -8,6 +9,14 @@
 #include <thread>
 
 using namespace clink::core::network;
+
+std::shared_ptr<clink::core::memory::Block> make_block(const std::vector<uint8_t>& data) {
+    auto block = clink::core::memory::BufferPool::instance()->acquire(data.size());
+    if (!data.empty()) {
+        block->append(data.data(), data.size());
+    }
+    return block;
+}
 
 struct TestContext {
     asio::io_context io_context;
@@ -40,9 +49,9 @@ TEST_CASE("ReliabilityEngine SACK and Congestion Control", "[network][reliabilit
 
     std::mutex sent_mutex;
     std::vector<std::vector<uint8_t>> sent_packets;
-    auto send_fn = [&](const std::vector<uint8_t>& data) {
+    auto send_fn = [&](const Packet& packet) {
         std::lock_guard<std::mutex> lock(sent_mutex);
-        sent_packets.push_back(data);
+        sent_packets.push_back(packet.serialize());
     };
 
     auto engine = std::make_shared<ReliabilityEngine>(io_context, nullptr, send_fn);
@@ -80,9 +89,9 @@ TEST_CASE("ReliabilityEngine SACK and Congestion Control", "[network][reliabilit
 
 
     SECTION("SACK blocks trigger removal from unacked queue") {
-        engine->send_reliable(PacketType::Data, {1, 2, 3}); // seq 1
-        engine->send_reliable(PacketType::Data, {4, 5, 6}); // seq 2
-        engine->send_reliable(PacketType::Data, {7, 8, 9}); // seq 3
+        engine->send_reliable(PacketType::Data, make_block({1, 2, 3})); // seq 1
+        engine->send_reliable(PacketType::Data, make_block({4, 5, 6})); // seq 2
+        engine->send_reliable(PacketType::Data, make_block({7, 8, 9})); // seq 3
 
         // Give some time for async operations if needed (though send_reliable is synchronous in adding to queue)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -107,7 +116,7 @@ TEST_CASE("ReliabilityEngine SACK and Congestion Control", "[network][reliabilit
         // Send packets to populate unacked_packets_
         // seq 1 to 5
         for (int i = 0; i < 5; ++i) {
-             engine->send_reliable(PacketType::Data, {uint8_t(i)});
+             engine->send_reliable(PacketType::Data, make_block({uint8_t(i)}));
         }
         
         // ACK seq 1
@@ -126,7 +135,7 @@ TEST_CASE("ReliabilityEngine SACK and Congestion Control", "[network][reliabilit
     SECTION("Fast Retransmit and Fast Recovery") {
         // Send packets seq 1, 2, 3, 4, 5
         for (int i = 0; i < 5; ++i) {
-             engine->send_reliable(PacketType::Data, {uint8_t(i)});
+             engine->send_reliable(PacketType::Data, make_block({uint8_t(i)}));
         }
         
         // ACK seq 1 (normal)
@@ -154,7 +163,7 @@ TEST_CASE("ReliabilityEngine SACK and Congestion Control", "[network][reliabilit
     SECTION("SACK-based Early Loss Detection") {
         // Send packets 1, 2, 3, 4, 5
         for (int i = 0; i < 5; ++i) {
-             engine->send_reliable(PacketType::Data, {uint8_t(i)});
+             engine->send_reliable(PacketType::Data, make_block({uint8_t(i)}));
         }
         
         // Suppose packet 1 is lost.

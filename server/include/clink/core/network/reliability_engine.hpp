@@ -10,6 +10,7 @@
 #include <mutex>
 #include <functional>
 #include <atomic>
+#include "clink/core/memory/buffer_pool.hpp"
 
 namespace clink::core::network {
 
@@ -18,7 +19,7 @@ namespace clink::core::network {
  */
 class ReliabilityEngine : public std::enable_shared_from_this<ReliabilityEngine> {
 public:
-    using SendFunction = std::function<void(const std::vector<uint8_t>&)>;
+    using SendFunction = std::function<void(const Packet&)>;
 
     explicit ReliabilityEngine(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger, SendFunction send_fn);
     ~ReliabilityEngine();
@@ -26,7 +27,7 @@ public:
     /**
      * @brief 发送数据包，并加入重传队列
      */
-    void send_reliable(PacketType type, std::vector<uint8_t> payload);
+    void send_reliable(PacketType type, std::shared_ptr<clink::core::memory::Block> payload);
 
     /**
      * @brief 处理收到的确认号

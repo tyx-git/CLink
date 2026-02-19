@@ -83,6 +83,23 @@ std::error_code TcpTransportAdapter::send(const uint8_t* data, size_t size) {
     return ec;
 }
 
+std::error_code TcpTransportAdapter::send(const Packet& packet) {
+    if (!running_) return std::make_error_code(std::errc::not_connected);
+
+    std::error_code ec;
+    asio::write(socket_, packet.serialize_to_buffers(), ec);
+    
+    if (ec && logger_) {
+        logger_->error("[tcp] send packet failed: " + ec.message());
+    }
+    
+    return ec;
+}
+
+void TcpTransportAdapter::on_receive(ZeroCopyReceiveCallback callback) {
+    zero_copy_receive_callback_ = std::move(callback);
+}
+
 void TcpTransportAdapter::on_receive(ReceiveCallback callback) {
     receive_callback_ = std::move(callback);
 }
@@ -93,11 +110,20 @@ bool TcpTransportAdapter::is_connected() const noexcept {
 
 void TcpTransportAdapter::do_receive() {
     auto self = shared_from_this();
-    socket_.async_read_some(asio::buffer(receive_buffer_),
-        [this, self](std::error_code ec, std::size_t length) {
+    // Acquire a block from the pool with at least 8KB capacity
+    auto block = memory::BufferPool::instance()->acquire(8192);
+
+    socket_.async_read_some(asio::buffer(block->write_ptr(), block->tailroom()),
+        [this, self, block](std::error_code ec, std::size_t length) {
             if (!ec) {
-                if (receive_callback_) {
-                    receive_callback_(receive_buffer_.data(), length);
+                // Commit the received data to the block
+                block->commit(length);
+
+                if (zero_copy_receive_callback_) {
+                    zero_copy_receive_callback_(block);
+                } else if (receive_callback_) {
+                    // Fallback for legacy callback
+                    receive_callback_(block->begin(), length);
                 }
                 do_receive();
             } else if (ec != asio::error::operation_aborted) {

@@ -33,6 +33,7 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
         network/reliability_test.cpp
         network/tls_adapter_test.cpp
         network/session_manager_test.cpp
+        network/zero_copy_test.cpp
     )
 
     target_link_libraries(clink-network-tests
