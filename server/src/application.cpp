@@ -1,16 +1,17 @@
-#include "clink/core/application.hpp"
-#include "clink/core/logging/config.hpp"
-#include "clink/core/network/session_manager_impl.hpp"
-#include "clink/core/network/tcp_adapter.hpp"
-#include "clink/core/network/tls_adapter.hpp"
-#include "clink/core/network/acl.hpp"
-#include "clink/core/security/psk_provider.hpp"
-#include "clink/core/security/windows_store.hpp"
-#include "clink/core/security/dpapi_helper.hpp"
-#include "clink/core/policy/engine.hpp"
-#include "clink/core/observability/telemetry.hpp"
-#include "clink/server/modules/heartbeat.hpp"
-#include "clink/server/modules/metrics.hpp"
+#include "server/include/clink/core/application.hpp"
+#include "server/include/clink/core/logging/config.hpp"
+#include "server/include/clink/core/network/session_manager_impl.hpp"
+#include "server/include/clink/core/network/tcp_adapter.hpp"
+#include "server/include/clink/core/network/tls_adapter.hpp"
+#include "server/include/clink/core/network/acl.hpp"
+#include "server/include/clink/core/security/psk_provider.hpp"
+#include "server/include/clink/core/security/windows_store.hpp"
+#include "server/include/clink/core/security/dpapi_helper.hpp"
+#include "server/include/clink/core/policy/engine.hpp"
+#include "server/include/clink/core/observability/telemetry.hpp"
+#include "server/include/clink/server/modules/heartbeat.hpp"
+#include "server/include/clink/server/modules/metrics.hpp"
+#include "server/include/clink/server/modules/process_manager.hpp"
 
 #include <thread>
 #include <fstream>
@@ -68,6 +69,14 @@ void Application::initialize() {
     }
     setup_ipc_handlers();
 
+    // Initialize Process Manager (Handles Process Injection & SOCKS)
+    if (options_.role == "service") {
+        auto pm = std::make_shared<clink::server::modules::ProcessManager>(io_context_, logger_, session_manager_);
+        if (pm->start(configuration_)) {
+            process_manager_ = pm;
+        }
+    }
+
     if (options_.auto_reload_config) {
         set_auto_reload(true);
     }
@@ -107,7 +116,7 @@ void Application::apply_configuration() {
         if (!endpoint.empty()) {
             std::unique_ptr<network::TransportListener> listener;
             
-            if (endpoint.starts_with("tls://")) {
+            if (endpoint.rfind("tls://", 0) == 0) {
                 auto tls_listener = std::make_unique<network::TlsTransportListener>(io_context_, logger_);
                 
                 // 加载 TLS 证书配置
@@ -126,7 +135,7 @@ void Application::apply_configuration() {
                 endpoint = endpoint.substr(6); // 移除 tls://
             } else {
                 listener = std::make_unique<network::TcpTransportListener>(io_context_, logger_);
-                if (endpoint.starts_with("tcp://")) {
+                if (endpoint.rfind("tcp://", 0) == 0) {
                     endpoint = endpoint.substr(6);
                 }
             }
@@ -276,48 +285,73 @@ void Application::start_config_watcher_timer() {
 void Application::setup_ipc_handlers() {
     if (ipc_server_) {
         ipc_server_->set_handler([this](const ipc::Message& req) -> ipc::Message {
+            auto json_escape = [](const std::string& input) -> std::string {
+                std::string out;
+                out.reserve(input.size() + 16);
+                for (char c : input) {
+                    switch (c) {
+                        case '\\': out += "\\\\"; break;
+                        case '"': out += "\\\""; break;
+                        case '\n': out += "\\n"; break;
+                        case '\r': out += "\\r"; break;
+                        case '\t': out += "\\t"; break;
+                        default: out.push_back(c); break;
+                    }
+                }
+                return out;
+            };
+
+            auto ok_payload = [&](const std::string& command, const std::string& data_json) -> std::string {
+                return "{\"ok\":true,\"command\":\"" + command + "\",\"data\":" + data_json + "}";
+            };
+
+            auto error_payload = [&](const std::string& command, const std::string& message) -> std::string {
+                return "{\"ok\":false,\"command\":\"" + command + "\",\"error\":\"" + json_escape(message) + "\"}";
+            };
+
             if (req.command == "reload") {
                 reload_configuration();
-                return {ipc::MessageType::Response, "reload", "ok"};
+                return {ipc::MessageType::Response, "reload", ok_payload("reload", "{\"status\":\"ok\"}")};
             }
             if (req.command == "status") {
-                return {ipc::MessageType::Response, "status", get_session_status()};
+                return {ipc::MessageType::Response, "status", ok_payload("status", get_session_status())};
             }
             if (req.command == "connect") {
                 connect_session();
-                return {ipc::MessageType::Response, "connect", "{\"status\": \"connecting\"}"};
+                return {ipc::MessageType::Response, "connect", ok_payload("connect", "{\"status\":\"connecting\"}")};
             }
             if (req.command == "disconnect") {
                 disconnect_session();
-                return {ipc::MessageType::Response, "disconnect", "{\"status\": \"disconnecting\"}"};
+                return {ipc::MessageType::Response, "disconnect", ok_payload("disconnect", "{\"status\":\"disconnecting\"}")};
             }
             if (req.command == "logs") {
-                // 实现简易的日志读取功能
                 std::string log_path = "logs/clink-daemon.log";
                 std::ifstream log_file(log_path, std::ios::binary);
                 if (!log_file.is_open()) {
-                    return {ipc::MessageType::Response, "logs", "{\"error\": \"failed to open log file\"}"};
+                    return {ipc::MessageType::Response, "logs", error_payload("logs", "failed to open log file")};
                 }
-                
-                // 获取最后 2000 字节
+
                 log_file.seekg(0, std::ios::end);
                 std::streamoff end_pos = log_file.tellg();
                 std::streamoff start_pos = (end_pos > 2000) ? (end_pos - 2000) : 0;
-                
+
                 log_file.seekg(start_pos);
                 std::string content((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
-                
-                // 处理可能被截断的行
+
                 if (start_pos > 0) {
                     auto first_newline = content.find('\n');
                     if (first_newline != std::string::npos) {
                         content = content.substr(first_newline + 1);
                     }
                 }
-                
-                return {ipc::MessageType::Response, "logs", content};
+
+                return {
+                    ipc::MessageType::Response,
+                    "logs",
+                    ok_payload("logs", "{\"content\":\"" + json_escape(content) + "\"}")
+                };
             }
-            return {ipc::MessageType::Response, req.command, "{\"error\": \"unknown command\"}"};
+            return {ipc::MessageType::Response, req.command, error_payload(req.command, "unknown command")};
         });
     }
 }
@@ -449,7 +483,7 @@ void Application::start_ipc_server(const std::string& address) {
 
 ipc::IpcClient& Application::ipc_client() {
     if (!ipc_client_) {
-        ipc_client_ = ipc::create_client();
+        ipc_client_ = ipc::create_client(logger_);
     }
     return *ipc_client_;
 }
@@ -482,7 +516,18 @@ std::string Application::get_session_status() const {
                 result += "\"bytes_sent\": " + std::to_string(s.bytes_sent) + ", ";
                 result += "\"bytes_received\": " + std::to_string(s.bytes_received) + ", ";
                 result += "\"rtt_ms\": " + std::to_string(s.rtt.count()) + ", ";
-                result += "\"rto_ms\": " + std::to_string(s.rto.count());
+                result += "\"rto_ms\": " + std::to_string(s.rto.count()) + ", ";
+                result += "\"retrans_count\": " + std::to_string(s.retransmission_count) + ", ";
+                result += "\"corrupted_packets\": " + std::to_string(s.corrupted_packets) + ", ";
+                result += "\"latency_distribution\": {";
+                result += "\"<10ms\": " + std::to_string(s.latency_bucket_10ms) + ", ";
+                result += "\"10-50ms\": " + std::to_string(s.latency_bucket_50ms) + ", ";
+                result += "\"50-100ms\": " + std::to_string(s.latency_bucket_100ms) + ", ";
+                result += "\"100-200ms\": " + std::to_string(s.latency_bucket_200ms) + ", ";
+                result += "\"200-500ms\": " + std::to_string(s.latency_bucket_500ms) + ", ";
+                result += "\"500ms-1s\": " + std::to_string(s.latency_bucket_1s) + ", ";
+                result += "\">1s\": " + std::to_string(s.latency_bucket_inf);
+                result += "}";
                 result += "}";
                 if (i < sessions.size() - 1) result += ", ";
             }
@@ -521,7 +566,7 @@ void Application::connect_session() {
 
         // 2. 创建适配器
         std::unique_ptr<network::TransportAdapter> adapter;
-        if (endpoint.starts_with("tls://")) {
+        if (endpoint.rfind("tls://", 0) == 0) {
             span->set_attribute("transport", "tls");
             auto tls_adapter = std::make_unique<network::TlsTransportAdapter>(io_context_, logger_);
             
@@ -536,7 +581,7 @@ void Application::connect_session() {
         } else {
             span->set_attribute("transport", "tcp");
             adapter = std::make_unique<network::TcpTransportAdapter>(io_context_, logger_);
-            if (endpoint.starts_with("tcp://")) {
+            if (endpoint.rfind("tcp://", 0) == 0) {
                 endpoint = endpoint.substr(6);
             }
         }

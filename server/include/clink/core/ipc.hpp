@@ -4,7 +4,7 @@
 #include <memory>
 #include <functional>
 #include <vector>
-#include "clink/core/logging/logger.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
 
 namespace clink::core::ipc {
 
@@ -37,6 +37,6 @@ public:
 };
 
 std::unique_ptr<IpcServer> create_server(std::shared_ptr<logging::Logger> logger);
-std::unique_ptr<IpcClient> create_client();
+std::unique_ptr<IpcClient> create_client(std::shared_ptr<logging::Logger> logger);
 
 } // namespace clink::core::ipc

@@ -1,10 +1,15 @@
-#include "clink/core/ipc.hpp"
+#include "client/include/clink/core/ipc.hpp"
 
 #include <iostream>
 #include <windows.h>
 #include <thread>
 #include <atomic>
 #include <vector>
+#include <chrono>
+
+namespace {
+constexpr char kShutdownCommand[] = "__clink_shutdown__";
+}
 
 namespace clink::core::ipc {
 
@@ -15,7 +20,10 @@ public:
     }
 
     void start(const std::string& address) override {
-        if (running_) return;
+        bool expected = false;
+        if (!running_.compare_exchange_strong(expected, true)) {
+            return;
+        }
         
         address_ = address;
         // Convert address to wstring for Windows API
@@ -26,19 +34,23 @@ public:
             waddress_ = std::wstring(waddr.data());
         }
 
-        running_ = true;
         server_thread_ = std::thread(&WindowsIpcServer::run_server, this);
     }
     
     void stop() override {
-        running_ = false;
-        if (hPipe_ != INVALID_HANDLE_VALUE) {
-            CancelIoEx(hPipe_, NULL);
-            CloseHandle(hPipe_);
-            hPipe_ = INVALID_HANDLE_VALUE;
+        if (!running_.exchange(false)) {
+            return;
         }
+
+        signal_shutdown();
+
         if (server_thread_.joinable()) {
             server_thread_.join();
+        }
+
+        HANDLE handle = hPipe_.exchange(INVALID_HANDLE_VALUE);
+        if (handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
         }
     }
     
@@ -103,6 +115,10 @@ private:
             // Enhanced debugging to see received commands
             // std::cout << "[ipc] server received: " << req.command << std::endl;
 
+            if (req.command == kShutdownCommand) {
+                return;
+            }
+
             Message resp = handler_ ? handler_(req) : Message{MessageType::Response, req.command, "{\"error\": \"no handler\"}"};
             
             std::string out = resp.command + "|" + resp.payload;
@@ -119,6 +135,48 @@ private:
     std::thread server_thread_;
     std::function<Message(const Message&)> handler_;
     std::atomic<HANDLE> hPipe_{INVALID_HANDLE_VALUE};
+
+    void signal_shutdown() {
+        if (server_thread_.joinable()) {
+            HANDLE thread_handle = reinterpret_cast<HANDLE>(server_thread_.native_handle());
+            if (thread_handle) {
+                using CancelSyncIoFn = BOOL(WINAPI*)(HANDLE);
+                static CancelSyncIoFn cancel_fn = reinterpret_cast<CancelSyncIoFn>(
+                    GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CancelSynchronousIo"));
+                if (cancel_fn) {
+                    cancel_fn(thread_handle);
+                }
+            }
+        }
+
+        if (waddress_.empty()) {
+            return;
+        }
+
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            HANDLE hClient = CreateFileW(
+                waddress_.c_str(),
+                GENERIC_READ | GENERIC_WRITE,
+                0, NULL, OPEN_EXISTING, 0, NULL);
+
+            if (hClient != INVALID_HANDLE_VALUE) {
+                std::string shutdown_frame = std::string(kShutdownCommand) + "|";
+                DWORD written = 0;
+                WriteFile(hClient, shutdown_frame.c_str(), static_cast<DWORD>(shutdown_frame.size()), &written, NULL);
+                CloseHandle(hClient);
+                break;
+            }
+
+            DWORD err = GetLastError();
+            if (err == ERROR_FILE_NOT_FOUND) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            } else if (err == ERROR_PIPE_BUSY) {
+                WaitNamedPipeW(waddress_.c_str(), 50);
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+    }
 };
 
 class WindowsIpcClient : public IpcClient {
@@ -208,11 +266,15 @@ private:
     std::wstring waddress_;
 };
 
-std::unique_ptr<IpcServer> create_server() {
+std::unique_ptr<IpcServer> create_server(std::shared_ptr<logging::Logger> /*logger*/) {
     return std::make_unique<WindowsIpcServer>();
 }
 
-std::unique_ptr<IpcClient> create_client() {
+std::unique_ptr<IpcServer> create_server() {
+    return create_server(nullptr);
+}
+
+std::unique_ptr<IpcClient> create_client(std::shared_ptr<logging::Logger> /*logger*/) {
     return std::make_unique<WindowsIpcClient>();
 }
 

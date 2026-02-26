@@ -1,7 +1,7 @@
 #pragma once
 
-#include "clink/core/security/auth.hpp"
-#include "clink/core/observability/telemetry.hpp"
+#include "server/include/clink/core/security/auth.hpp"
+#include "server/include/clink/core/observability/telemetry.hpp"
 #include <unordered_map>
 #include <mutex>
 

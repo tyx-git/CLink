@@ -1,4 +1,4 @@
-#include "clink/core/network/acl.hpp"
+#include "server/include/clink/core/network/acl.hpp"
 #include <sstream>
 
 namespace clink::core::network {
