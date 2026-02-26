@@ -1,4 +1,4 @@
-#include "clink/core/logging/logger.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -23,7 +23,7 @@
 #include <spdlog/pattern_formatter.h>
 #include <spdlog/fmt/fmt.h>
 
-#include "clink/core/config/configuration.hpp"
+#include "../../include/clink/core/config/configuration.hpp"
 
 namespace clink::core::logging {
 

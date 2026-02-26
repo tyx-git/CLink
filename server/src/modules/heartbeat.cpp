@@ -1,4 +1,4 @@
-#include "clink/server/modules/heartbeat.hpp"
+#include "server/include/clink/server/modules/heartbeat.hpp"
 
 namespace clink::modules {
 

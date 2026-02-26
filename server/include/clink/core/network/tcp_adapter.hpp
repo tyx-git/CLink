@@ -1,13 +1,13 @@
 #pragma once
 
-#include "clink/core/network/transport_adapter.hpp"
-#include "clink/core/network/transport_listener.hpp"
-#include "clink/core/logging/logger.hpp"
+#include "server/include/clink/core/network/transport_adapter.hpp"
+#include "server/include/clink/core/network/transport_listener.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
 #include <memory>
 #include <string>
 #include <asio.hpp>
 #include <atomic>
-#include "clink/core/memory/buffer_pool.hpp"
+#include "server/include/clink/core/memory/buffer_pool.hpp"
 
 namespace clink::core::network {
 
@@ -27,6 +27,7 @@ public:
 
     std::string_view type() const noexcept override { return "tcp"; }
 
+    void start(); // Start receiving (for accepted connections)
     std::error_code start(const std::string& endpoint) override;
     void stop() override;
     std::error_code send(const uint8_t* data, size_t size) override;
@@ -39,6 +40,8 @@ public:
 
 private:
     void do_receive();
+    void do_read_header();
+    void do_read_body(std::shared_ptr<memory::Block> block, uint16_t payload_size);
 
     asio::io_context& io_context_;
     std::shared_ptr<logging::Logger> logger_;

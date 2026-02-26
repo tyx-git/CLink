@@ -7,13 +7,13 @@
 #include <string>
 #include <asio.hpp>
 
-#include "clink/core/config/configuration.hpp"
-#include "clink/core/logging/logger.hpp"
-#include "clink/core/registry.hpp"
-#include "clink/core/ipc.hpp"
-#include "clink/core/network/session_manager.hpp"
-#include "clink/core/security/auth.hpp"
-#include "clink/core/policy/engine.hpp"
+#include "server/include/clink/core/config/configuration.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
+#include "registry.hpp"
+#include "ipc.hpp"
+#include "server/include/clink/core/network/session_manager.hpp"
+#include "server/include/clink/core/security/auth.hpp"
+#include "server/include/clink/core/policy/engine.hpp"
 
 #ifndef CLINK_SOURCE_DIR
 #define CLINK_SOURCE_DIR "."
@@ -98,6 +98,10 @@ private:
     std::shared_ptr<policy::PolicyEngine> policy_engine_;
     std::unique_ptr<ipc::IpcServer> ipc_server_;
     std::unique_ptr<ipc::IpcClient> ipc_client_;
+    
+    // Process Manager (Handles IPC and SOCKS)
+    std::shared_ptr<void> process_manager_; // Using void* to avoid header dependency
+    
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
     std::atomic<SessionState> session_state_{SessionState::Disconnected};

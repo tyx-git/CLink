@@ -4,6 +4,7 @@
 #include <memory>
 #include <functional>
 #include <vector>
+#include "client/include/clink/core/logging/logger.hpp"
 
 namespace clink::core::ipc {
 
@@ -35,7 +36,9 @@ public:
     virtual Message send_request(const Message& request) = 0;
 };
 
+// Add logger parameter to create_server function
+std::unique_ptr<IpcServer> create_server(std::shared_ptr<logging::Logger> logger);
 std::unique_ptr<IpcServer> create_server();
-std::unique_ptr<IpcClient> create_client();
+std::unique_ptr<IpcClient> create_client(std::shared_ptr<logging::Logger> logger);
 
 } // namespace clink::core::ipc

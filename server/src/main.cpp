@@ -1,4 +1,4 @@
-#include "clink/core/application.hpp"
+#include "server/include/clink/core/application.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -20,7 +20,7 @@ void signal_handler(int signal) {
         std::cout << "\nReceived shutdown signal, stopping..." << std::endl;
         if (auto* app = g_app_ptr.load()) {
             // 使用默认的 5 秒超时
-            app->shutdown(std::chrono::seconds(5));
+            app->Application::shutdown(std::chrono::seconds(5));
         }
     }
 }
@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
         app.initialize();
         app.start_ipc_server("\\\\.\\pipe\\clink-ipc");
         app.run();
-        app.shutdown();
+        app.Application::shutdown(std::chrono::seconds(5));
     } catch (const std::exception& ex) {
         std::cerr << "Service failed: " << ex.what() << std::endl;
         return 1;

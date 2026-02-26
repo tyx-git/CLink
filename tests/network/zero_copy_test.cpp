@@ -11,6 +11,7 @@ using namespace clink::core::network;
 // Instrumented Mock Virtual Interface
 class InstrumentedVirtualInterface : public VirtualInterface {
 public:
+    using VirtualInterface::write_packet;
     std::error_code open(const std::string&, const std::string&, const std::string&) override { return {}; }
     void close() override {}
     uint32_t mtu() const noexcept override { return 1500; }
@@ -128,18 +129,28 @@ TEST_CASE("Zero Copy Data Path Verification", "[network][zerocopy]") {
         // 1. Create a block in TransportAdapter (simulating network receive)
         auto block = clink::core::memory::BufferPool::instance()->acquire(1024);
         
-        // Write Packet Header
-        PacketHeader header;
-        header.type = static_cast<uint8_t>(PacketType::Data);
-        header.seq_num = 100;
-        header.ack_num = 0;
-        const char* payload = "NetworkData";
-        header.payload_size = static_cast<uint16_t>(strlen(payload));
+        // Prepare Packet with Checksum
+        Packet p;
+        p.header.type = static_cast<uint8_t>(PacketType::Data);
+        p.header.seq_num = 100;
+        p.header.ack_num = 0;
         
-        memcpy(block->write_ptr(), &header, sizeof(header));
-        block->commit(sizeof(header));
-        memcpy(block->write_ptr(), payload, header.payload_size);
-        block->commit(header.payload_size);
+        const char* payload = "NetworkData";
+        size_t payload_len = strlen(payload);
+        
+        // Setup payload block for serialize
+        auto p_block = clink::core::memory::BufferPool::instance()->acquire(payload_len);
+        memcpy(p_block->write_ptr(), payload, payload_len);
+        p_block->commit(payload_len);
+        p.block = p_block;
+        p.header.payload_size = static_cast<uint16_t>(payload_len);
+        p.offset = 0;
+        
+        std::vector<uint8_t> serialized = p.serialize();
+        
+        // Copy serialized data (header + payload with checksum) into receive block
+        memcpy(block->write_ptr(), serialized.data(), serialized.size());
+        block->commit(serialized.size());
         
         // 2. Pass block to SessionManager
         adapter->simulate_receive(block);
@@ -150,7 +161,7 @@ TEST_CASE("Zero Copy Data Path Verification", "[network][zerocopy]") {
         // Calculate expected pointer address
         const uint8_t* expected_ptr = block->begin() + sizeof(PacketHeader);
         CHECK(session_manager->vif_raw_->last_written_data_ptr_ == expected_ptr);
-        CHECK(session_manager->vif_raw_->last_written_size_ == header.payload_size);
+        CHECK(session_manager->vif_raw_->last_written_size_ == p.header.payload_size);
     }
 
     session_manager->shutdown();

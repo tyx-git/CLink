@@ -1,4 +1,4 @@
-#include "clink/core/observability/telemetry.hpp"
+#include "server/include/clink/core/observability/telemetry.hpp"
 #include <iostream>
 #include <mutex>
 #include <spdlog/spdlog.h>

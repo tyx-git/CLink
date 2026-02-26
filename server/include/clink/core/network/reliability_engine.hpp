@@ -2,15 +2,15 @@
 
 #include <asio.hpp>
 #include <memory>
-#include "clink/core/logging/logger.hpp"
-#include "clink/core/network/packet.hpp"
-#include "clink/core/network/rate_limiter.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
+#include "server/include/clink/core/network/packet.hpp"
+#include "server/include/clink/core/network/rate_limiter.hpp"
 #include <set>
 #include <map>
 #include <mutex>
 #include <functional>
 #include <atomic>
-#include "clink/core/memory/buffer_pool.hpp"
+#include "server/include/clink/core/memory/buffer_pool.hpp"
 
 namespace clink::core::network {
 
@@ -69,6 +69,7 @@ public:
      * @brief 设置带宽限制 (字节/秒)
      */
     void set_rate_limit(size_t bytes_per_second, size_t burst_size);
+    void report_corrupted_packet();
 
     /**
      * @brief 记录收到的字节数
@@ -92,6 +93,18 @@ public:
         uint64_t bytes_received{0};
         uint32_t cwnd{10};           // 当前拥塞窗口 (以包为单位)
         uint32_t ssthresh{64};       // 慢启动阈值
+        
+        // Data Integrity
+        uint64_t corrupted_packets{0}; 
+
+        // Latency Distribution (Histogram Buckets)
+        uint32_t latency_bucket_10ms{0};   // < 10ms
+        uint32_t latency_bucket_50ms{0};   // 10-50ms
+        uint32_t latency_bucket_100ms{0};  // 50-100ms
+        uint32_t latency_bucket_200ms{0};  // 100-200ms
+        uint32_t latency_bucket_500ms{0};  // 200-500ms
+        uint32_t latency_bucket_1s{0};     // 500ms-1s
+        uint32_t latency_bucket_inf{0};    // > 1s
     };
     Stats get_stats() const;
 

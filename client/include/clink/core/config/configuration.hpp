@@ -22,6 +22,7 @@ public:
     [[nodiscard]] int get_int(std::string_view key, int default_value = 0) const;
     [[nodiscard]] std::vector<std::string> get_list(std::string_view key) const;
     [[nodiscard]] std::size_t size() const noexcept { return values_.size(); }
+    [[nodiscard]] std::vector<std::string> get_keys() const;
 
     void set(std::string key, std::string value);
 
