@@ -1,6 +1,6 @@
 #pragma once
 
-#include "clink/core/network/transport_adapter.hpp"
+#include "server/include/clink/core/network/transport_adapter.hpp"
 #include <memory>
 #include <string>
 #include <functional>

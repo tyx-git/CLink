@@ -1,4 +1,4 @@
-#include "clink/core/config/configuration.hpp"
+#include "server/include/clink/core/config/configuration.hpp"
 
 #include <algorithm>
 #include <cctype>

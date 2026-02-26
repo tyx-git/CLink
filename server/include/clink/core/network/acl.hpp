@@ -1,6 +1,6 @@
 #pragma once
 
-#include "clink/core/logging/logger.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
 #include <string>
 #include <vector>
 #include <shared_mutex>

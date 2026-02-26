@@ -5,8 +5,8 @@
 #include <vector>
 #include <functional>
 #include <system_error>
-#include "clink/core/memory/buffer_pool.hpp"
-#include "clink/core/network/packet.hpp"
+#include "server/include/clink/core/memory/buffer_pool.hpp"
+#include "server/include/clink/core/network/packet.hpp"
 
 namespace clink::core::network {
 
@@ -46,7 +46,11 @@ public:
      */
     virtual std::error_code send(const Packet& packet) {
         // Default fallback to copying
-        auto buffers = packet.serialize_to_buffers();
+        // Make a local copy to finalize checksum
+        Packet temp = packet;
+        temp.finalize();
+
+        auto buffers = temp.serialize_to_buffers();
         std::vector<uint8_t> temp_buffer;
         size_t total_size = 0;
         for (const auto& buf : buffers) {

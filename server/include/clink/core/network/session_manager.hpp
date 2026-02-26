@@ -6,9 +6,9 @@
 #include <shared_mutex>
 #include <unordered_map>
 
-#include "clink/core/network/transport_adapter.hpp"
-#include "clink/core/network/transport_listener.hpp"
-#include "clink/core/policy/engine.hpp"
+#include "server/include/clink/core/network/transport_adapter.hpp"
+#include "server/include/clink/core/network/transport_listener.hpp"
+#include "server/include/clink/core/policy/engine.hpp"
 
 namespace clink::core::network {
 
@@ -39,6 +39,17 @@ struct SessionContext {
     std::chrono::milliseconds rto{200};
     float packet_loss_rate{0.0f};
     policy::Policy policy;
+    
+    // Quality Metrics
+    uint64_t retransmission_count{0};
+    uint64_t corrupted_packets{0};
+    uint32_t latency_bucket_10ms{0};
+    uint32_t latency_bucket_50ms{0};
+    uint32_t latency_bucket_100ms{0};
+    uint32_t latency_bucket_200ms{0};
+    uint32_t latency_bucket_500ms{0};
+    uint32_t latency_bucket_1s{0};
+    uint32_t latency_bucket_inf{0};
 };
 
 /**
@@ -82,6 +93,11 @@ public:
      * @brief 获取所有活跃会话的快照
      */
     virtual std::vector<SessionContext> get_active_sessions() const = 0;
+
+    /**
+     * @brief 获取虚拟接口的 IP 地址
+     */
+    virtual std::string get_virtual_interface_address() const = 0;
 
     /**
      * @brief 路由数据包到对应的会话或虚拟接口

@@ -82,6 +82,10 @@ private:
     std::shared_ptr<ModuleRegistry> module_registry_;
     std::unique_ptr<ipc::IpcServer> ipc_server_;
     std::unique_ptr<ipc::IpcClient> ipc_client_;
+    
+    // Process Manager
+    std::shared_ptr<void> process_manager_;
+    
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
     std::atomic<SessionState> session_state_{SessionState::Disconnected};

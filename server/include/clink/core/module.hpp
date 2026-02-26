@@ -3,7 +3,7 @@
 #include <memory>
 #include <string_view>
 
-#include "clink/core/config/configuration.hpp"
+#include "server/include/clink/core/config/configuration.hpp"
 
 namespace clink::core {
 

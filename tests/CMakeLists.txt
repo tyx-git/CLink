@@ -29,28 +29,42 @@ endif()
 
 # Network reliability tests
 if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
-    add_executable(clink-network-tests
+    add_executable(clink-network-tests-v2
         network/reliability_test.cpp
         network/tls_adapter_test.cpp
         network/session_manager_test.cpp
         network/zero_copy_test.cpp
+        network/tcp_framing_test.cpp
     )
 
-    target_link_libraries(clink-network-tests
+    if(WIN32)
+        target_sources(clink-network-tests-v2 PRIVATE 
+            server/ipc_proxy_test.cpp
+            server/socks_server_test.cpp
+            server/dll_integration_test.cpp
+        )
+    endif()
+
+    target_link_libraries(clink-network-tests-v2
         PRIVATE
             clink::core
             Catch2::Catch2WithMain
     )
 
-    target_include_directories(clink-network-tests
+    if(WIN32)
+        target_link_libraries(clink-network-tests-v2 PRIVATE clink-process-server)
+    endif()
+
+    target_include_directories(clink-network-tests-v2
         PRIVATE
             ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/server/include
+            ${CMAKE_SOURCE_DIR}/modules/process_inject/include
     )
 
-    set_project_options(clink-network-tests)
+    set_project_options(clink-network-tests-v2)
 
-    add_test(NAME clink-network-tests COMMAND clink-network-tests)
+    add_test(NAME clink-network-tests-v2 COMMAND clink-network-tests-v2)
 endif()
 
 # Performance tests for logging system

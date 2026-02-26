@@ -1,7 +1,7 @@
 #pragma once
 
-#include "clink/core/module.hpp"
-#include "clink/core/logging/logger.hpp"
+#include "server/include/clink/core/module.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
 #include <chrono>
 #include <memory>
 #include <atomic>

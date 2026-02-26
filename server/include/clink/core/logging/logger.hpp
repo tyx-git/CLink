@@ -9,7 +9,7 @@
 #include <string_view>
 #include <utility>
 
-#include "clink/core/logging/config.hpp"
+#include "server/include/clink/core/logging/config.hpp"
 
 namespace clink::core {
 

@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <optional>
 #include <set>
-#include "clink/core/config/configuration.hpp"
+#include "server/include/clink/core/config/configuration.hpp"
 
 namespace clink::core::policy {
 
@@ -46,13 +46,13 @@ public:
         std::set<std::string> devices;
 
         for (const auto& key : keys) {
-            if (key.starts_with("policy.groups.")) {
+            if (key.rfind("policy.groups.", 0) == 0) {
                 auto sub = key.substr(14); // length of "policy.groups."
                 auto dot = sub.find('.');
                 if (dot != std::string::npos) {
                     groups.insert(sub.substr(0, dot));
                 }
-            } else if (key.starts_with("policy.devices.")) {
+            } else if (key.rfind("policy.devices.", 0) == 0) {
                 auto sub = key.substr(15); // length of "policy.devices."
                 auto dot = sub.find('.');
                 if (dot != std::string::npos) {

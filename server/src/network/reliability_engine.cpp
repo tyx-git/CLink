@@ -1,5 +1,5 @@
-#include "clink/core/network/reliability_engine.hpp"
-#include "clink/core/network/packet.hpp"
+#include "server/include/clink/core/network/reliability_engine.hpp"
+#include "server/include/clink/core/network/packet.hpp"
 #include <algorithm>
 
 namespace clink::core::network {
@@ -11,6 +11,11 @@ ReliabilityEngine::ReliabilityEngine(asio::io_context& io_context, std::shared_p
 
 ReliabilityEngine::~ReliabilityEngine() {
     stop();
+}
+
+void ReliabilityEngine::report_corrupted_packet() {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.corrupted_packets++;
 }
 
 void ReliabilityEngine::start() {
@@ -101,6 +106,9 @@ void ReliabilityEngine::send_reliable(PacketType type, std::shared_ptr<clink::co
     // payload_size is set by Packet constructor
     packet->header.seq_num = next_seq_num_++;
     packet->header.ack_num = last_received_seq_.load();
+    
+    // Finalize packet (calculate checksum) before storing/sending
+    packet->finalize();
 
     size_t packet_size = sizeof(PacketHeader) + packet->header.payload_size;
     
@@ -289,6 +297,16 @@ void ReliabilityEngine::set_last_received_seq(uint32_t seq) {
 
 void ReliabilityEngine::update_rto(std::chrono::milliseconds rtt_sample) {
     std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+
+    // Update latency distribution buckets
+    if (rtt_sample < std::chrono::milliseconds(10)) stats_.latency_bucket_10ms++;
+    else if (rtt_sample < std::chrono::milliseconds(50)) stats_.latency_bucket_50ms++;
+    else if (rtt_sample < std::chrono::milliseconds(100)) stats_.latency_bucket_100ms++;
+    else if (rtt_sample < std::chrono::milliseconds(200)) stats_.latency_bucket_200ms++;
+    else if (rtt_sample < std::chrono::milliseconds(500)) stats_.latency_bucket_500ms++;
+    else if (rtt_sample < std::chrono::seconds(1)) stats_.latency_bucket_1s++;
+    else stats_.latency_bucket_inf++;
+
     if (stats_.rtt.count() == 0) {
         stats_.rtt = rtt_sample;
         stats_.rttvar = rtt_sample / 2;

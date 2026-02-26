@@ -1,8 +1,8 @@
 #pragma once
 
-#include "clink/core/network/transport_adapter.hpp"
-#include "clink/core/network/transport_listener.hpp"
-#include "clink/core/logging/logger.hpp"
+#include "server/include/clink/core/network/transport_adapter.hpp"
+#include "server/include/clink/core/network/transport_listener.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
 #include <memory>
 #include <string>
 #include <asio.hpp>
@@ -10,7 +10,7 @@
 #include <atomic>
 #include <deque>
 #include <variant>
-#include "clink/core/memory/buffer_pool.hpp"
+#include "server/include/clink/core/memory/buffer_pool.hpp"
 
 namespace clink::core::network {
 

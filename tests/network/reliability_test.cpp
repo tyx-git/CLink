@@ -87,6 +87,34 @@ TEST_CASE("ReliabilityEngine SACK and Congestion Control", "[network][reliabilit
         CHECK(blocks[0].second == 6);
     }
 
+    SECTION("Timeout triggers retransmission and increments counter") {
+        engine->send_reliable(PacketType::Data, make_block({10, 11, 12})); // seq 1
+        
+        // Initial stats
+        auto stats = engine->get_stats();
+        REQUIRE(stats.retransmission_count == 0);
+        
+        // Clear sent packets to track new sends
+        {
+            std::lock_guard<std::mutex> lock(sent_mutex);
+            sent_packets.clear();
+        }
+
+        // Wait for RTO (default 200ms) + buffer
+        // Note: Timer resolution is 50ms, RTO is 200ms. 
+        // We wait 400ms to be safe and allow multiple timer ticks.
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        
+        // Should have retransmitted
+        stats = engine->get_stats();
+        CHECK(stats.retransmission_count >= 1);
+        
+        {
+            std::lock_guard<std::mutex> lock(sent_mutex);
+            CHECK(sent_packets.size() >= 1);
+        }
+    }
+
 
     SECTION("SACK blocks trigger removal from unacked queue") {
         engine->send_reliable(PacketType::Data, make_block({1, 2, 3})); // seq 1

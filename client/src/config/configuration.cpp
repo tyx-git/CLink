@@ -1,4 +1,4 @@
-#include "clink/core/config/configuration.hpp"
+#include "client/include/clink/core/config/configuration.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -157,6 +157,15 @@ std::vector<std::string> Configuration::get_list(std::string_view key) const {
     }
     auto view = trim(it->second);
     return parse_list(view);
+}
+
+std::vector<std::string> Configuration::get_keys() const {
+    std::vector<std::string> keys;
+    keys.reserve(values_.size());
+    for (const auto& [key, _] : values_) {
+        keys.push_back(key);
+    }
+    return keys;
 }
 
 void Configuration::set(std::string key, std::string value) {

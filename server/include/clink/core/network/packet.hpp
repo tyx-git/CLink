@@ -5,7 +5,7 @@
 #include <memory>
 #include <chrono>
 #include <cstring>
-#include "clink/core/memory/buffer_pool.hpp"
+#include "server/include/clink/core/memory/buffer_pool.hpp"
 #include <asio/buffer.hpp>
 
 namespace clink::core::network {
@@ -60,17 +60,21 @@ struct Packet {
          }
     }
 
+    // Finalize packet before sending (calculates checksum)
+    void finalize();
+
     // 辅助方法：序列化 (Legacy copy)
     std::vector<uint8_t> serialize() const;
     
     // 辅助方法：零拷贝序列化
+    // Requires finalize() to be called first if checksum is needed
     std::vector<asio::const_buffer> serialize_to_buffers() const;
     
     // 辅助方法：反序列化 (Legacy copy)
-    static std::unique_ptr<Packet> deserialize(const uint8_t* data, size_t size);
+    static std::unique_ptr<Packet> deserialize(const uint8_t* data, size_t size, bool* out_corrupted = nullptr);
 
     // 辅助方法：零拷贝反序列化
-    static std::unique_ptr<Packet> deserialize(std::shared_ptr<clink::core::memory::Block> block);
+    static std::unique_ptr<Packet> deserialize(std::shared_ptr<clink::core::memory::Block> block, bool* out_corrupted = nullptr);
     
     // Accessors for payload
     uint8_t* payload_data() { return block ? block->begin() + offset : nullptr; }

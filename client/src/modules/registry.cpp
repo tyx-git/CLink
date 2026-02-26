@@ -1,5 +1,5 @@
-#include "clink/core/registry.hpp"
-#include "clink/core/logging/logger.hpp"
+#include "client/include/clink/core/registry.hpp"
+#include "client/include/clink/core/logging/logger.hpp"
 
 #include <stdexcept>
 

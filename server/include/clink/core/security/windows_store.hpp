@@ -1,6 +1,6 @@
 #pragma once
 
-#include "clink/core/security/auth.hpp"
+#include "server/include/clink/core/security/auth.hpp"
 #include <windows.h>
 #include <dpapi.h>
 #include <vector>

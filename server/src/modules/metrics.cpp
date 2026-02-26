@@ -1,4 +1,4 @@
-#include "clink/server/modules/metrics.hpp"
+#include "server/include/clink/server/modules/metrics.hpp"
 #include <iostream>
 
 namespace clink::modules {

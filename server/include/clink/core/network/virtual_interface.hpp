@@ -7,7 +7,7 @@
 #include <functional>
 #include <memory>
 #include <cstdint>
-#include "clink/core/memory/buffer_pool.hpp"
+#include "server/include/clink/core/memory/buffer_pool.hpp"
 
 namespace clink::core::network {
 

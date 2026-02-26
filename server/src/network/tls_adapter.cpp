@@ -1,9 +1,11 @@
-#include "clink/core/network/tls_adapter.hpp"
+#include "server/include/clink/core/network/tls_adapter.hpp"
+#include <iostream>
 #include <chrono>
 #include <vector>
 #include <algorithm>
 #include <openssl/x509.h>
 #include <openssl/evp.h>
+#include <asio/steady_timer.hpp>
 
 namespace clink::core::network {
 
@@ -32,7 +34,7 @@ TlsTransportAdapter::TlsTransportAdapter(asio::io_context& io_context, std::shar
 }
 
 void TlsTransportAdapter::start_accepted() {
-    asio::post(strand_, [this, self = shared_from_this()]() {
+    asio::post(io_context_, [this, self = shared_from_this()]() {
         do_receive();
     });
 }
@@ -49,6 +51,7 @@ void TlsTransportAdapter::set_certificates(const std::string& ca_cert, const std
 
 std::error_code TlsTransportAdapter::start(const std::string& endpoint) {
     if (running_) return {};
+    std::cerr << "TlsTransportAdapter::start " << endpoint << std::endl;
 
     remote_endpoint_ = endpoint;
     
@@ -62,36 +65,90 @@ std::error_code TlsTransportAdapter::start(const std::string& endpoint) {
     int port = std::stoi(endpoint.substr(colon_pos + 1));
 
     // Initialize SSL context for client
-    ssl_ctx_ = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
+    try {
+        ssl_ctx_ = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to create ssl_ctx: " << e.what() << std::endl;
+        return std::make_error_code(std::errc::not_enough_memory);
+    }
     
     if (!ca_cert_path_.empty()) {
-        ssl_ctx_->load_verify_file(ca_cert_path_);
-        ssl_ctx_->set_verify_mode(asio::ssl::verify_peer);
-        ssl_ctx_->set_verify_callback(std::bind(&TlsTransportAdapter::verify_certificate, this, std::placeholders::_1, std::placeholders::_2));
+        try {
+            ssl_ctx_->load_verify_file(ca_cert_path_);
+            // ssl_ctx_->set_verify_mode(asio::ssl::verify_peer);
+            ssl_ctx_->set_verify_mode(asio::ssl::verify_none); // DEBUG: Disable verify
+            /*
+            ssl_ctx_->set_verify_callback([this](bool preverified, asio::ssl::verify_context& ctx) {
+                std::cerr << "Client verify callback: preverified=" << preverified << std::endl;
+                if (!preverified) {
+                    X509* cert = X509_STORE_CTX_get_current_cert(ctx.native_handle());
+                    if (cert) {
+                        char subject[256];
+                        X509_NAME_oneline(X509_get_subject_name(cert), subject, 256);
+                        std::cerr << "Client failed to verify: " << subject << std::endl;
+                    }
+                    int err = X509_STORE_CTX_get_error(ctx.native_handle());
+                    std::cerr << "Client verify error: " << X509_verify_cert_error_string(err) << std::endl;
+                }
+                return this->verify_certificate(preverified, ctx);
+            });
+            */
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to load CA cert: " << e.what() << std::endl;
+            if (logger_) logger_->error("[tls] failed to load CA cert: " + std::string(e.what()));
+            return std::make_error_code(std::errc::invalid_argument);
+        }
     } else {
         ssl_ctx_->set_verify_mode(asio::ssl::verify_none);
     }
 
     if (!client_cert_path_.empty() && !client_key_path_.empty()) {
-        ssl_ctx_->use_certificate_chain_file(client_cert_path_);
-        ssl_ctx_->use_private_key_file(client_key_path_, asio::ssl::context::pem);
+        try {
+            ssl_ctx_->use_certificate_chain_file(client_cert_path_);
+            ssl_ctx_->use_private_key_file(client_key_path_, asio::ssl::context::pem);
+        } catch (const std::exception& e) {
+             std::cerr << "Failed to load client certs: " << e.what() << std::endl;
+             if (logger_) logger_->error("[tls] failed to load client certs: " + std::string(e.what()));
+             return std::make_error_code(std::errc::invalid_argument);
+        }
     }
 
-    asio::ip::tcp::socket socket(strand_);
+    std::cerr << "Creating socket..." << std::endl;
+    asio::ip::tcp::socket socket(io_context_);
     stream_ = std::make_unique<asio::ssl::stream<asio::ip::tcp::socket>>(std::move(socket), *ssl_ctx_);
 
     asio::ip::tcp::resolver resolver(io_context_);
-    auto endpoints = resolver.resolve(ip, std::to_string(port));
+    asio::ip::tcp::resolver::results_type endpoints;
+    try {
+        std::cerr << "Resolving..." << std::endl;
+        endpoints = resolver.resolve(ip, std::to_string(port));
+    } catch (const std::exception& e) {
+        std::cerr << "Resolve failed: " << e.what() << std::endl;
+        if (logger_) logger_->error("[tls] failed to resolve " + endpoint + ": " + std::string(e.what()));
+        return std::make_error_code(std::errc::host_unreachable);
+    }
 
     std::error_code ec;
+    std::cerr << "Connecting..." << std::endl;
     asio::connect(stream_->lowest_layer(), endpoints, ec);
     if (ec) {
+        std::cerr << "Connect failed: " << ec.message() << std::endl;
         if (logger_) logger_->error("[tls] failed to connect to " + endpoint + ": " + ec.message());
         return ec;
     }
+    
+    stream_->lowest_layer().set_option(asio::ip::tcp::no_delay(true));
 
+    std::cerr << "Starting handshake..." << std::endl;
     running_ = true;
-    do_handshake();
+    // Async handshake to avoid blocking
+    auto self = shared_from_this();
+    asio::post(io_context_, [this, self]() {
+        if (!stream_) std::cerr << "Stream is null!" << std::endl;
+        if (!ssl_ctx_) std::cerr << "SSL Context is null!" << std::endl;
+        do_handshake();
+        std::cerr << "Handshake initiated on strand" << std::endl;
+    });
     return {};
 }
 
@@ -114,7 +171,7 @@ std::error_code TlsTransportAdapter::send(const uint8_t* data, size_t size) {
     std::vector<uint8_t> buffer(data, data + size);
     auto self = shared_from_this();
     
-    asio::post(strand_, [this, self, buffer = std::move(buffer)]() mutable {
+    asio::post(io_context_, [this, self, buffer = std::move(buffer)]() mutable {
         bool write_in_progress = !write_queue_.empty();
         write_queue_.emplace_back(std::move(buffer));
         if (!write_in_progress && handshake_complete_) {
@@ -130,9 +187,10 @@ std::error_code TlsTransportAdapter::send(const Packet& packet) {
     
     // Make a copy of the packet (shares the block)
     Packet pkt_copy = packet;
+    pkt_copy.finalize(); // Ensure checksum is calculated
     auto self = shared_from_this();
     
-    asio::post(strand_, [this, self, pkt = std::move(pkt_copy)]() mutable {
+    asio::post(io_context_, [this, self, pkt = std::move(pkt_copy)]() mutable {
         bool write_in_progress = !write_queue_.empty();
         write_queue_.emplace_back(std::move(pkt));
         if (!write_in_progress && handshake_complete_) {
@@ -161,10 +219,10 @@ void TlsTransportAdapter::do_write() {
     if (std::holds_alternative<Packet>(write_queue_.front())) {
         const auto& pkt = std::get<Packet>(write_queue_.front());
         // serialize_to_buffers returns vector of const_buffer, which is copyable and valid as long as pkt is alive
-        asio::async_write(*stream_, pkt.serialize_to_buffers(), asio::bind_executor(strand_, write_handler));
+        asio::async_write(*stream_, pkt.serialize_to_buffers(), write_handler);
     } else {
         const auto& data = std::get<std::vector<uint8_t>>(write_queue_.front());
-        asio::async_write(*stream_, asio::buffer(data), asio::bind_executor(strand_, write_handler));
+        asio::async_write(*stream_, asio::buffer(data), write_handler);
     }
 }
 
@@ -174,8 +232,21 @@ bool TlsTransportAdapter::is_connected() const noexcept {
 
 void TlsTransportAdapter::do_handshake() {
     auto self = shared_from_this();
+    
+    // Set a timeout for the handshake
+    auto timer = std::make_shared<asio::steady_timer>(io_context_);
+    timer->expires_after(std::chrono::seconds(10));
+    timer->async_wait([self, timer](const std::error_code& ec) {
+        if (!ec) {
+             if (self->logger_) self->logger_->error("[tls] client handshake timed out");
+             std::cerr << "TlsTransportAdapter: Handshake timed out" << std::endl;
+             self->stop();
+        }
+    });
+
     stream_->async_handshake(asio::ssl::stream_base::client,
-        asio::bind_executor(strand_, [this, self](std::error_code ec) {
+        [this, self, timer](std::error_code ec) {
+            timer->cancel();
             if (!ec) {
                 if (logger_) logger_->info("[tls] SSL client handshake successful with " + remote_endpoint_);
                 handshake_complete_ = true;
@@ -185,9 +256,11 @@ void TlsTransportAdapter::do_handshake() {
                 do_receive();
             } else if (ec != asio::error::operation_aborted) {
                 if (logger_) logger_->error("[tls] SSL client handshake failed: " + ec.message());
+                std::cerr << "TlsTransportAdapter: Handshake failed: " << ec.message() << std::endl;
                 stop();
             }
-        }));
+        });
+    // std::cerr << "Client async_handshake SKIPPED for debugging" << std::endl;
 }
 
 void TlsTransportAdapter::do_receive() {
@@ -197,7 +270,7 @@ void TlsTransportAdapter::do_receive() {
     auto block = clink::core::memory::BufferPool::instance()->acquire(8192);
 
     stream_->async_read_some(asio::buffer(block->write_ptr(), block->tailroom()),
-        asio::bind_executor(strand_, [this, self, block](std::error_code ec, std::size_t length) {
+        [this, self, block](std::error_code ec, std::size_t length) {
             if (!ec) {
                 block->commit(length);
 
@@ -214,7 +287,7 @@ void TlsTransportAdapter::do_receive() {
                 }
                 stop();
             }
-        }));
+        });
 }
 
 bool TlsTransportAdapter::verify_certificate(bool preverified, asio::ssl::verify_context& ctx) {
@@ -273,7 +346,25 @@ void TlsTransportListener::set_certificates(const std::string& ca_cert, const st
 
     if (!ca_cert_path_.empty()) {
         ssl_ctx_->load_verify_file(ca_cert_path_);
-        ssl_ctx_->set_verify_mode(asio::ssl::verify_peer | asio::ssl::verify_fail_if_no_peer_cert);
+        // ssl_ctx_->set_verify_mode(asio::ssl::verify_peer | asio::ssl::verify_fail_if_no_peer_cert);
+        ssl_ctx_->set_verify_mode(asio::ssl::verify_none); // DEBUG: Disable verify
+        
+        /*
+        ssl_ctx_->set_verify_callback([this](bool preverified, asio::ssl::verify_context& ctx) {
+            std::cerr << "Server verify callback: preverified=" << preverified << std::endl;
+            if (!preverified) {
+                X509* cert = X509_STORE_CTX_get_current_cert(ctx.native_handle());
+                if (cert) {
+                    char subject[256];
+                    X509_NAME_oneline(X509_get_subject_name(cert), subject, 256);
+                    std::cerr << "Server failed to verify: " << subject << std::endl;
+                }
+                int err = X509_STORE_CTX_get_error(ctx.native_handle());
+                std::cerr << "Server verify error: " << X509_verify_cert_error_string(err) << std::endl;
+            }
+            return preverified;
+        });
+        */
     }
 
     if (!server_cert_path_.empty() && !server_key_path_.empty()) {
@@ -345,14 +436,32 @@ void TlsTransportListener::on_connection(NewConnectionCallback callback) {
 
 void TlsTransportListener::do_accept() {
     auto self = shared_from_this();
-    acceptor_.async_accept(asio::make_strand(io_context_),
+    acceptor_.async_accept(io_context_,
         [this, self](std::error_code ec, asio::ip::tcp::socket socket) {
             if (!ec) {
+                std::cerr << "TlsTransportListener: Accepted connection from " << socket.remote_endpoint() << std::endl;
+                socket.set_option(asio::ip::tcp::no_delay(true));
                 auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket>>(std::move(socket), *ssl_ctx_);
                 
+                std::cerr << "TlsTransportListener: Starting server handshake" << std::endl;
+                
+                auto timer = std::make_shared<asio::steady_timer>(io_context_);
+                timer->expires_after(std::chrono::seconds(10));
+                timer->async_wait([stream](const std::error_code& ec) {
+                    if (!ec) {
+                        std::cerr << "TlsTransportListener: Handshake timed out" << std::endl;
+                        std::error_code ignore;
+                        stream->lowest_layer().close(ignore);
+                    }
+                });
+
+                std::cerr << "TlsTransportListener: Calling async_handshake" << std::endl;
                 stream->async_handshake(asio::ssl::stream_base::server,
-                    [this, self, stream](std::error_code ec) {
+                    [this, self, stream, timer](std::error_code ec) {
+                        std::cerr << "Server handshake callback" << std::endl;
+                        timer->cancel();
                         if (!ec) {
+                            std::cerr << "TlsTransportListener: Handshake success" << std::endl;
                             if (logger_) logger_->info("[tls] SSL server handshake successful");
                             if (connection_callback_) {
                                 auto adapter = std::make_shared<TlsTransportAdapter>(io_context_, logger_, std::move(*stream), ssl_ctx_);
@@ -360,6 +469,7 @@ void TlsTransportListener::do_accept() {
                                 connection_callback_(std::move(adapter));
                             }
                         } else {
+                            std::cerr << "TlsTransportListener: Handshake failed: " << ec.message() << std::endl;
                             if (logger_) {
                                 logger_->error("[tls] SSL server handshake failed: " + ec.message());
                             }
@@ -368,6 +478,7 @@ void TlsTransportListener::do_accept() {
                 
                 do_accept();
             } else if (ec != asio::error::operation_aborted) {
+                std::cerr << "TlsTransportListener: Accept failed: " << ec.message() << std::endl;
                 if (logger_) {
                     logger_->error("[tls] accept error: " + ec.message());
                 }

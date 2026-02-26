@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "clink/core/module.hpp"
+#include "server/include/clink/core/module.hpp"
 
 namespace clink::core {
 

@@ -1,8 +1,8 @@
-#include "clink/core/network/session_manager_impl.hpp"
-#include "clink/core/network/tcp_adapter.hpp"
-#include "clink/core/network/tls_adapter.hpp"
-#include "clink/core/network/packet.hpp"
-#include "clink/core/observability/telemetry.hpp"
+#include "server/include/clink/core/network/session_manager_impl.hpp"
+#include "server/include/clink/core/network/tcp_adapter.hpp"
+#include "server/include/clink/core/network/tls_adapter.hpp"
+#include "server/include/clink/core/network/packet.hpp"
+#include "server/include/clink/core/observability/telemetry.hpp"
 #include <chrono>
 
 namespace clink::core::network {
@@ -24,10 +24,11 @@ std::error_code DefaultSessionManager::initialize() {
         logger_->info("[session] initializing session manager");
     }
     
-    // TODO: 实际上应该从配置中读取这些值
-    std::string if_name = "clink0";
-    std::string address = "10.8.0.1";
-    std::string netmask = "255.255.255.0";
+    std::string if_name = interface_name_;
+    std::string address = interface_address_;
+    std::string netmask = interface_netmask_;
+
+    virtual_interface_address_ = address;
 
     virtual_interface_ = create_interface();
     if (!virtual_interface_) {
@@ -193,11 +194,25 @@ void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
         observability::ScopedSpan span(tracer->start_span("network_to_tun"));
         
         // 反序列化数据包 (Zero-Copy)
-        auto packet = Packet::deserialize(block);
+        bool corrupted = false;
+        auto packet = Packet::deserialize(block, &corrupted);
         if (!packet) {
             // Note: If TCP stream fragmentation occurs, this might drop data. 
             // Framing logic should be implemented in TransportAdapter or here.
-            if (this_ptr->logger_) this_ptr->logger_->warn("[session] received invalid or incomplete packet from " + session_id);
+            
+            if (corrupted) {
+                if (this_ptr->logger_) this_ptr->logger_->warn("[session] received corrupted packet from " + session_id);
+                {
+                    std::shared_lock lock(this_ptr->sessions_mutex_);
+                    auto it = this_ptr->engines_.find(session_id);
+                    if (it != this_ptr->engines_.end()) {
+                        it->second->report_corrupted_packet();
+                    }
+                }
+            } else {
+                 // Incomplete packet (or just wait for more data)
+                 // For now, we drop it, but in a real TCP stream we should buffer.
+            }
             return;
         }
         
@@ -285,10 +300,25 @@ std::vector<SessionContext> DefaultSessionManager::get_active_sessions() const {
             updated_ctx.rto = stats.rto;
             updated_ctx.bytes_sent = stats.bytes_sent;
             updated_ctx.bytes_received = stats.bytes_received;
+            
+            // Quality Metrics
+            updated_ctx.retransmission_count = stats.retransmission_count;
+            updated_ctx.corrupted_packets = stats.corrupted_packets;
+            updated_ctx.latency_bucket_10ms = stats.latency_bucket_10ms;
+            updated_ctx.latency_bucket_50ms = stats.latency_bucket_50ms;
+            updated_ctx.latency_bucket_100ms = stats.latency_bucket_100ms;
+            updated_ctx.latency_bucket_200ms = stats.latency_bucket_200ms;
+            updated_ctx.latency_bucket_500ms = stats.latency_bucket_500ms;
+            updated_ctx.latency_bucket_1s = stats.latency_bucket_1s;
+            updated_ctx.latency_bucket_inf = stats.latency_bucket_inf;
         }
         result.push_back(updated_ctx);
     }
     return result;
+}
+
+std::string DefaultSessionManager::get_virtual_interface_address() const {
+    return virtual_interface_address_;
 }
 
 std::error_code DefaultSessionManager::route_packet(const uint8_t* data, size_t size) {
@@ -335,8 +365,8 @@ void DefaultSessionManager::shutdown() {
     }
 }
 
-std::unique_ptr<SessionManager> create_session_manager(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger) {
-    return std::make_unique<DefaultSessionManager>(io_context, std::move(logger));
+std::shared_ptr<SessionManager> create_session_manager(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger) {
+    return std::make_shared<DefaultSessionManager>(io_context, std::move(logger));
 }
 
 }  // namespace clink::core::network

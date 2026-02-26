@@ -9,6 +9,7 @@ using namespace clink::core::network;
 
 class MockVirtualInterface : public VirtualInterface {
 public:
+    using VirtualInterface::write_packet;
     std::error_code open(const std::string& name, const std::string& address, const std::string& netmask) override {
         return {};
     }

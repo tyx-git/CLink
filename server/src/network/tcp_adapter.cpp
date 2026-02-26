@@ -1,4 +1,4 @@
-#include "clink/core/network/tcp_adapter.hpp"
+#include "server/include/clink/core/network/tcp_adapter.hpp"
 #include <iostream>
 #include <chrono>
 
@@ -16,11 +16,16 @@ TcpTransportAdapter::TcpTransportAdapter(asio::io_context& io_context, std::shar
     } catch (...) {
         remote_endpoint_ = "unknown";
     }
-    do_receive();
 }
 
 TcpTransportAdapter::~TcpTransportAdapter() {
     stop();
+}
+
+void TcpTransportAdapter::start() {
+    if (running_ && socket_.is_open()) {
+        do_receive();
+    }
 }
 
 std::error_code TcpTransportAdapter::start(const std::string& endpoint) {
@@ -86,8 +91,12 @@ std::error_code TcpTransportAdapter::send(const uint8_t* data, size_t size) {
 std::error_code TcpTransportAdapter::send(const Packet& packet) {
     if (!running_) return std::make_error_code(std::errc::not_connected);
 
+    // Make a local copy to finalize checksum
+    Packet temp = packet;
+    temp.finalize();
+
     std::error_code ec;
-    asio::write(socket_, packet.serialize_to_buffers(), ec);
+    asio::write(socket_, temp.serialize_to_buffers(), ec);
     
     if (ec && logger_) {
         logger_->error("[tcp] send packet failed: " + ec.message());
@@ -109,27 +118,63 @@ bool TcpTransportAdapter::is_connected() const noexcept {
 }
 
 void TcpTransportAdapter::do_receive() {
+    do_read_header();
+}
+
+void TcpTransportAdapter::do_read_header() {
     auto self = shared_from_this();
-    // Acquire a block from the pool with at least 8KB capacity
-    auto block = memory::BufferPool::instance()->acquire(8192);
-
-    socket_.async_read_some(asio::buffer(block->write_ptr(), block->tailroom()),
-        [this, self, block](std::error_code ec, std::size_t length) {
+    // Use a small buffer for header
+    auto block = memory::BufferPool::instance()->acquire(sizeof(PacketHeader));
+    
+    asio::async_read(socket_, asio::buffer(block->write_ptr(), sizeof(PacketHeader)),
+        [this, self, block](std::error_code ec, std::size_t length) mutable {
             if (!ec) {
-                // Commit the received data to the block
                 block->commit(length);
+                
+                // Parse header to get payload size
+                const PacketHeader* hdr = reinterpret_cast<const PacketHeader*>(block->begin());
+                uint16_t payload_size = hdr->payload_size;
+                
+                if (payload_size > 0) {
+                    // We need a block that can hold header + payload
+                    // If current block is too small, we need a new one
+                    if (block->tailroom() < payload_size) {
+                         auto new_block = memory::BufferPool::instance()->acquire(sizeof(PacketHeader) + payload_size);
+                         std::memcpy(new_block->write_ptr(), block->begin(), length);
+                         new_block->commit(length);
+                         block = new_block;
+                    }
+                    do_read_body(block, payload_size);
+                } else {
+                    // No payload, dispatch immediately
+                    if (zero_copy_receive_callback_) {
+                        zero_copy_receive_callback_(block);
+                    } else if (receive_callback_) {
+                        receive_callback_(block->begin(), length);
+                    }
+                    do_receive();
+                }
+            } else if (ec != asio::error::operation_aborted) {
+                if (logger_) logger_->error("[tcp] read header error: " + ec.message());
+                stop();
+            }
+        });
+}
 
+void TcpTransportAdapter::do_read_body(std::shared_ptr<memory::Block> block, uint16_t payload_size) {
+    auto self = shared_from_this();
+    asio::async_read(socket_, asio::buffer(block->write_ptr(), payload_size),
+        [this, self, block, payload_size](std::error_code ec, std::size_t length) {
+            if (!ec) {
+                block->commit(length);
                 if (zero_copy_receive_callback_) {
                     zero_copy_receive_callback_(block);
                 } else if (receive_callback_) {
-                    // Fallback for legacy callback
-                    receive_callback_(block->begin(), length);
+                    receive_callback_(block->begin(), block->size());
                 }
                 do_receive();
             } else if (ec != asio::error::operation_aborted) {
-                if (logger_) {
-                    logger_->error("[tcp] receive error: " + ec.message());
-                }
+                if (logger_) logger_->error("[tcp] read body error: " + ec.message());
                 stop();
             }
         });
@@ -205,6 +250,8 @@ void TcpTransportListener::do_accept() {
             if (!ec) {
                 if (connection_callback_) {
                     auto adapter = std::make_shared<TcpTransportAdapter>(io_context_, logger_, std::move(socket));
+                    // Start receiving after adapter construction is complete (safe for shared_from_this)
+                    adapter->start();
                     connection_callback_(std::move(adapter));
                 }
                 do_accept();

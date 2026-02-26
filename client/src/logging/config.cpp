@@ -1,11 +1,11 @@
-#include "clink/core/logging/config.hpp"
+#include "client/include/clink/core/logging/config.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <stdexcept>
 
-#include "clink/core/config/configuration.hpp"
+#include "client/include/clink/core/config/configuration.hpp"
 
 namespace clink::core::logging {
 
