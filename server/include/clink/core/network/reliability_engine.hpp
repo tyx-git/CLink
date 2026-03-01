@@ -52,7 +52,7 @@ public:
     uint32_t get_last_received_seq() const { return last_received_seq_; }
     void set_last_received_seq(uint32_t seq);
 
-    void start();
+    void start_async(std::function<void(std::error_code)> on_started = {});
     void stop();
 
     /**
@@ -109,6 +109,7 @@ public:
     Stats get_stats() const;
 
 private:
+    void ensure_timer();
     void start_timer();
     void update_rto(std::chrono::milliseconds rtt_sample);
 
@@ -138,7 +139,8 @@ private:
     Stats stats_;
 
     std::atomic<bool> running_{false};
-    asio::steady_timer timer_;
+    std::unique_ptr<asio::steady_timer> timer_;
+    std::once_flag timer_once_;
 
     // 指数退避参数
     const std::chrono::milliseconds initial_rto_{200};

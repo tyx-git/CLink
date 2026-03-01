@@ -3,7 +3,8 @@ role = "service"
 data_dir = "${CLINK_DATA_DIR}"  # override via environment
 
 [network]
-listen = "tls://0.0.0.0:4433"
+# note: runtime reads network.listen_endpoint
+listen_endpoint = "tcp://0.0.0.0:4433"
 bandwidth_limit = 10240  # 10 KB/s for testing rate limiting
 
 [security]

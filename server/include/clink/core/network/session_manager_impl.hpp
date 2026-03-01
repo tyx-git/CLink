@@ -43,6 +43,10 @@ public:
         interface_netmask_ = std::move(netmask);
     }
 
+    void set_virtual_interface_enabled(bool enabled) {
+        virtual_interface_enabled_ = enabled;
+    }
+
     void set_acl(std::shared_ptr<AccessControlList> acl) { acl_ = std::move(acl); }
     void set_policy_engine(std::shared_ptr<policy::PolicyEngine> engine) { policy_engine_ = std::move(engine); }
 
@@ -72,6 +76,7 @@ private:
     std::string interface_name_{"clink0"};
     std::string interface_address_{"10.8.0.1"};
     std::string interface_netmask_{"255.255.255.0"};
+    bool virtual_interface_enabled_{true};
     
     asio::steady_timer heartbeat_timer_;
 };

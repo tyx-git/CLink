@@ -885,7 +885,15 @@ private:
 
 VirtualInterfacePtr create_virtual_interface(asio::io_context& io_context) {
 #ifdef _WIN32
-    return std::make_unique<WindowsVirtualInterface>(io_context);
+    try {
+        return std::make_unique<WindowsVirtualInterface>(io_context);
+    } catch (const std::exception& e) {
+        std::cerr << "[virtual_interface] create failed with exception: " << e.what() << std::endl;
+        return {};
+    } catch (...) {
+        std::cerr << "[virtual_interface] create failed with unknown exception" << std::endl;
+        return {};
+    }
 #else
     return std::make_unique<LinuxVirtualInterface>(io_context);
 #endif

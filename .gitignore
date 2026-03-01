@@ -25,6 +25,7 @@ test/
 config/certs/
 scripts/
 /docs/
+report.md
 
 # Misc
 .DS_Store

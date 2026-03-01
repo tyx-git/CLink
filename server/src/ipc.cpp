@@ -11,6 +11,23 @@
 
 namespace {
     constexpr char kShutdownCommand[] = "__clink_shutdown__";
+
+std::string json_escape(const std::string& input) {
+    std::string out;
+    out.reserve(input.size() + 16);
+    for (char c : input) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
 struct PipeSecurityAttributes {
     SECURITY_ATTRIBUTES attributes{};
     PSECURITY_DESCRIPTOR descriptor{nullptr};
@@ -119,37 +136,44 @@ private:
             // Wait for client to connect
             if (ConnectNamedPipe(hPipe, NULL) || GetLastError() == ERROR_PIPE_CONNECTED) {
                 if (running_) {
-                    process_client();
+                    std::thread([this, hPipe]() {
+                        process_client(hPipe);
+                    }).detach();
+                    continue;
                 }
             }
 
-            // Disconnect and close
+            // Disconnect and close (only for failed/aborted accept path)
             DisconnectNamedPipe(hPipe);
             CloseHandle(hPipe);
             hPipe_ = INVALID_HANDLE_VALUE;
         }
     }
 
-    void process_client() {
+    void process_client(HANDLE hCurrentPipe) {
+        static std::atomic<uint64_t> req_counter{0};
+
         char buffer[4096];
         DWORD bytesRead;
-        // Use the current handle stored in hPipe_
-        HANDLE hCurrentPipe = hPipe_.load();
         if (hCurrentPipe == INVALID_HANDLE_VALUE) return;
 
         std::string raw;
         bool success = false;
-        
+
         do {
             if (ReadFile(hCurrentPipe, buffer, sizeof(buffer), &bytesRead, NULL)) {
                 raw.append(buffer, bytesRead);
                 success = true;
                 break;
             } else {
-                if (GetLastError() == ERROR_MORE_DATA) {
+                DWORD err = GetLastError();
+                if (err == ERROR_MORE_DATA) {
                     raw.append(buffer, bytesRead);
                 } else {
-                    return; // Error
+                    if (logger_) logger_->error(std::string("[ipc] read request failed (error ") + std::to_string(err) + ")");
+                    DisconnectNamedPipe(hCurrentPipe);
+                    CloseHandle(hCurrentPipe);
+                    return;
                 }
             }
         } while (true);
@@ -165,10 +189,17 @@ private:
                 req.command = raw;
             }
 
-            // Enhanced debugging to see received commands
-            // std::cout << "[ipc] server received: " << req.command << std::endl;
+            const uint64_t req_id = ++req_counter;
+            if (logger_) {
+                logger_->info("[ipc.req.start] id=" + std::to_string(req_id) +
+                              " command=" + req.command +
+                              " payload_bytes=" + std::to_string(req.payload.size()));
+            }
 
             if (req.command == kShutdownCommand) {
+                if (logger_) logger_->info("[ipc.req.end] id=" + std::to_string(req_id) + " command=shutdown");
+                DisconnectNamedPipe(hCurrentPipe);
+                CloseHandle(hCurrentPipe);
                 return;
             }
 
@@ -178,25 +209,71 @@ private:
                     resp = handler_(req);
                 } catch (const std::exception& ex) {
                     if (logger_) logger_->error(std::string("[ipc] handler threw exception: ") + ex.what());
-                    resp = Message{MessageType::Response, req.command, std::string("{\"error\": \"") + ex.what() + "\"}"};
+                    resp = Message{MessageType::Response, req.command, std::string("{\"ok\":false,\"command\":\"") + req.command + "\",\"error\":\"handler exception: " + ex.what() + "\"}"};
                 } catch (...) {
                     if (logger_) logger_->error("[ipc] handler threw unknown exception");
-                    resp = Message{MessageType::Response, req.command, "{\"error\": \"handler unknown error\"}"};
+                    resp = Message{MessageType::Response, req.command, std::string("{\"ok\":false,\"command\":\"") + req.command + "\",\"error\":\"handler unknown error\"}"};
                 }
             } else {
                 if (logger_) logger_->error(std::string("[ipc] no handler set for request: ") + req.command);
-                resp = Message{MessageType::Response, req.command, "{\"error\": \"no handler\"}"};
+                resp = Message{MessageType::Response, req.command, std::string("{\"ok\":false,\"command\":\"") + req.command + "\",\"error\":\"no handler\"}"};
             }
 
             std::string out = resp.command + "|" + resp.payload;
-            DWORD bytesWritten;
-            if (WriteFile(hCurrentPipe, out.c_str(), static_cast<DWORD>(out.length()), &bytesWritten, NULL)) {
-                FlushFileBuffers(hCurrentPipe);
-            } else {
+            const char* data = out.data();
+            size_t remaining = out.size();
+            DWORD bytesWritten = 0;
+            bool write_ok = true;
+
+            while (remaining > 0) {
+                if (WriteFile(hCurrentPipe, data, static_cast<DWORD>(remaining), &bytesWritten, NULL)) {
+                    if (bytesWritten == 0) {
+                        write_ok = false;
+                        if (logger_) logger_->error("[ipc] write returned success with zero bytes, aborting response write");
+                        break;
+                    }
+                    data += bytesWritten;
+                    remaining -= bytesWritten;
+                    continue;
+                }
+
                 DWORD err = GetLastError();
-                if (logger_) logger_->error(std::string("[ipc] failed to write response to client (error ") + std::to_string(err) + ")");
+                if (err == ERROR_OPERATION_ABORTED) {
+                    continue;
+                }
+
+                write_ok = false;
+                if (logger_) {
+                    logger_->error(std::string("[ipc.resp.write.fail] id=") + std::to_string(req_id) +
+                                  " command=" + req.command +
+                                  " payload_bytes=" + std::to_string(resp.payload.size()) +
+                                  " error=" + std::to_string(err));
+                }
+                break;
+            }
+
+            if (write_ok) {
+                if (!FlushFileBuffers(hCurrentPipe)) {
+                    DWORD err = GetLastError();
+                    if (logger_) {
+                        logger_->error(std::string("[ipc.resp.flush.fail] id=") + std::to_string(req_id) +
+                                      " command=" + req.command +
+                                      " error=" + std::to_string(err));
+                    }
+                } else if (logger_) {
+                    logger_->info(std::string("[ipc.resp.write.ok] id=") + std::to_string(req_id) +
+                                  " command=" + req.command +
+                                  " payload_bytes=" + std::to_string(resp.payload.size()));
+                }
+            }
+
+            if (logger_) {
+                logger_->info(std::string("[ipc.req.end] id=") + std::to_string(req_id) + " command=" + req.command);
             }
         }
+
+        DisconnectNamedPipe(hCurrentPipe);
+        CloseHandle(hCurrentPipe);
     }
 
     std::shared_ptr<logging::Logger> logger_;
@@ -212,8 +289,16 @@ private:
             HANDLE thread_handle = reinterpret_cast<HANDLE>(server_thread_.native_handle());
             if (thread_handle) {
                 using CancelSyncIoFn = BOOL(WINAPI*)(HANDLE);
-                static CancelSyncIoFn cancel_fn = reinterpret_cast<CancelSyncIoFn>(
-                    GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "CancelSynchronousIo"));
+                static CancelSyncIoFn cancel_fn = nullptr;
+                if (!cancel_fn) {
+                    HMODULE hMod = GetModuleHandleW(L"kernel32.dll");
+                    if (hMod) {
+                        FARPROC proc = GetProcAddress(hMod, "CancelSynchronousIo");
+                        if (proc) {
+                            cancel_fn = reinterpret_cast<CancelSyncIoFn>(reinterpret_cast<void*>(proc));
+                        }
+                    }
+                }
                 if (cancel_fn) {
                     cancel_fn(thread_handle);
                 }
@@ -271,9 +356,13 @@ public:
     }
     
     Message send_request(const Message& request) override {
+        auto make_error_payload = [&](const std::string& msg) {
+            return std::string("{\"ok\":false,\"command\":\"") + json_escape(request.command) + "\",\"error\":\"" + json_escape(msg) + "\"}";
+        };
+
         HANDLE hPipe = INVALID_HANDLE_VALUE;
         int retries = 5;
-        
+
         while (retries > 0) {
             hPipe = CreateFileW(
                 waddress_.c_str(),
@@ -295,54 +384,73 @@ public:
 
         if (hPipe == INVALID_HANDLE_VALUE) {
             DWORD lastErr = GetLastError();
-            std::string errMsg = "failed to open pipe " + address_ + " (error " + std::to_string(lastErr) + ")";
+            std::string errMsg = "command=" + request.command + " failed to open pipe " + address_ +
+                                 " (error " + std::to_string(lastErr) + ")";
             if (lastErr == 2) errMsg += " - service might not be running";
-            logger_->error(errMsg);
-            return {MessageType::Response, request.command, "{\"error\": \"" + errMsg + "\"}"};
+            if (logger_) logger_->error(errMsg);
+            return {MessageType::Response, request.command, make_error_payload(errMsg)};
         }
 
-        // Set pipe to message mode
         DWORD dwMode = PIPE_READMODE_MESSAGE;
         if (!SetNamedPipeHandleState(hPipe, &dwMode, NULL, NULL)) {
             DWORD err = GetLastError();
             if (logger_) logger_->error(std::string("[ipc] failed to set pipe mode (error ") + std::to_string(err) + ")");
             CloseHandle(hPipe);
-            return {MessageType::Response, request.command, "{\"error\": \"failed to set pipe mode\"}"};
+            return {MessageType::Response, request.command, make_error_payload("failed to set pipe mode")};
         }
 
         std::string out = request.command + "|" + request.payload;
-        DWORD bytesWritten;
-        if (!WriteFile(hPipe, out.c_str(), static_cast<DWORD>(out.length()), &bytesWritten, NULL)) {
-            DWORD err = GetLastError();
-            if (logger_) logger_->error(std::string("[ipc] failed to write to pipe (error ") + std::to_string(err) + ")");
-            CloseHandle(hPipe);
-            return {MessageType::Response, request.command, "{\"error\": \"failed to write to pipe\"}"};
+        const char* write_ptr = out.data();
+        size_t remaining = out.size();
+        DWORD bytesWritten = 0;
+
+        while (remaining > 0) {
+            if (!WriteFile(hPipe, write_ptr, static_cast<DWORD>(remaining), &bytesWritten, NULL)) {
+                DWORD err = GetLastError();
+                if (err == ERROR_OPERATION_ABORTED) {
+                    continue;
+                }
+                if (logger_) logger_->error(std::string("[ipc] failed to write to pipe (error ") + std::to_string(err) + ")");
+                CloseHandle(hPipe);
+                return {MessageType::Response, request.command, make_error_payload("failed to write to pipe (error " + std::to_string(err) + ")")};
+            }
+
+            if (bytesWritten == 0) {
+                CloseHandle(hPipe);
+                return {MessageType::Response, request.command, make_error_payload("write returned zero bytes")};
+            }
+
+            write_ptr += bytesWritten;
+            remaining -= bytesWritten;
         }
 
         std::string raw;
         char buffer[4096];
-        DWORD bytesRead;
+        DWORD bytesRead = 0;
         Message resp{MessageType::Response, request.command, ""};
-        
-        // Read loop for message mode
+
         bool success = false;
         do {
             if (ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, NULL)) {
                 raw.append(buffer, bytesRead);
                 success = true;
-                break; // Finished reading
-            } else {
-                DWORD err = GetLastError();
-                if (err == ERROR_MORE_DATA) {
-                    raw.append(buffer, bytesRead);
-                    // Continue reading
-                } else {
-                        if (logger_) logger_->error(std::string("[ipc] failed to read from pipe (error ") + std::to_string(err) + ")");
-                        resp.payload = "{\"error\": \"failed to read from pipe (error " + std::to_string(err) + ")\"}";
-                        CloseHandle(hPipe);
-                        return resp;
-                }
+                break;
             }
+
+            DWORD err = GetLastError();
+            if (err == ERROR_MORE_DATA) {
+                raw.append(buffer, bytesRead);
+                continue;
+            }
+
+            if (logger_) logger_->error(std::string("[ipc] failed to read from pipe (error ") + std::to_string(err) + ")");
+            if (err == ERROR_BROKEN_PIPE) {
+                resp.payload = make_error_payload("daemon closed pipe before response (error=109)");
+            } else {
+                resp.payload = make_error_payload("failed to read from pipe (error " + std::to_string(err) + ")");
+            }
+            CloseHandle(hPipe);
+            return resp;
         } while (true);
 
         if (success) {

@@ -9,7 +9,6 @@ set(PROJECT_WARNINGS
     -Woverloaded-virtual
     -Wconversion
     -Wsign-conversion
-    -Wnull-dereference
     -Wdouble-promotion
     -Wformat=2
 )

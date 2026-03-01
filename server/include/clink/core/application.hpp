@@ -41,6 +41,7 @@ public:
     void initialize();
     void run();
     void shutdown(std::chrono::milliseconds timeout = std::chrono::seconds(5));
+    void request_stop() noexcept { running_.store(false); }
 
     [[nodiscard]] const ApplicationOptions& options() const noexcept { return options_; }
     [[nodiscard]] bool running() const noexcept { return running_.load(); }
@@ -63,7 +64,7 @@ public:
     };
 
     // Session methods
-    void connect_session();
+    std::string connect_session(const std::string& endpoint_override = "");
     void disconnect_session();
     std::string get_session_status() const;
 
@@ -104,6 +105,7 @@ private:
     
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
+    std::atomic<bool> shutdown_called_{false};
     std::atomic<SessionState> session_state_{SessionState::Disconnected};
     std::string session_id_{"none"};
 

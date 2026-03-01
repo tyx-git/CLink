@@ -155,7 +155,7 @@ TEST_CASE("Configuration integration", "[logging][config]") {
 
     SECTION("Load from sample config file") {
         // This test requires the sample config file to exist
-        auto sample_path = std::filesystem::path("config/clink.sample.toml");
+        auto sample_path = std::filesystem::path("config/clink.init.toml");
         if (std::filesystem::exists(sample_path)) {
             auto config = config::Configuration::load_from_file(sample_path);
 

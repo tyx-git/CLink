@@ -15,6 +15,8 @@
 
 #include <thread>
 #include <fstream>
+#include <stdexcept>
+#include <nlohmann/json.hpp>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -40,53 +42,115 @@ void Application::initialize() {
     log_lifecycle("initializing subsystems");
 
 #ifdef _WIN32
+    logger_->info("[init] stage=winsock_startup.begin");
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        logger_->error("[init] stage=winsock_startup.failed");
         logger_->error("Failed to initialize Winsock");
         return;
     }
+    logger_->info("[init] stage=winsock_startup.ok");
 #endif
 
-    load_configuration();
-    
-    // Initialize logging system with configuration early
-    initialize_logging();
-    
-    // Initialize Security & Policy
-    credential_store_ = std::make_shared<security::WindowsCredentialStore>();
-    auth_service_ = std::make_shared<security::PskAuthProvider>();
-    policy_engine_ = std::make_shared<policy::PolicyEngine>();
-    policy_engine_->load_from_config(configuration_);
+    try {
+        logger_->info("[init] stage=load_configuration.begin");
+        load_configuration();
+        logger_->info("[init] stage=load_configuration.ok");
 
-    // 初始化 SessionManager 等 (apply_configuration 会负责创建)
-    apply_configuration();
+        logger_->info("[init] stage=initialize_logging.begin");
+        initialize_logging();
+        logger_->info("[init] stage=initialize_logging.ok");
 
-    // Start IPC server if needed (usually handled by main or specialized call)
-    // 注意：ipc_server_ 必须在 setup_ipc_handlers 之前创建
-    if (!ipc_server_ && options_.role == "service") {
-        ipc_server_ = ipc::create_server(logger_);
-        ipc_server_->start("\\\\.\\pipe\\clink-ipc");
-    }
-    setup_ipc_handlers();
+        logger_->info("[init] stage=security_policy_init.begin");
+        credential_store_ = std::make_shared<security::WindowsCredentialStore>();
+        auth_service_ = std::make_shared<security::PskAuthProvider>();
+        policy_engine_ = std::make_shared<policy::PolicyEngine>();
+        policy_engine_->load_from_config(configuration_);
+        logger_->info("[init] stage=security_policy_init.ok");
 
-    // Initialize Process Manager (Handles Process Injection & SOCKS)
-    if (options_.role == "service") {
-        auto pm = std::make_shared<clink::server::modules::ProcessManager>(io_context_, logger_, session_manager_);
-        if (pm->start(configuration_)) {
-            process_manager_ = pm;
+        logger_->info("[init] stage=apply_configuration.begin");
+        apply_configuration();
+        logger_->info("[init] stage=apply_configuration.ok");
+
+        if (!ipc_server_ && options_.role == "service") {
+            logger_->info("[init] stage=ipc_server.start_default.begin");
+            ipc_server_ = ipc::create_server(logger_);
+            ipc_server_->start("\\\\.\\pipe\\clink-ipc");
+            logger_->info("[init] stage=ipc_server.start_default.ok");
         }
-    }
 
-    if (options_.auto_reload_config) {
-        set_auto_reload(true);
+        logger_->info("[init] stage=ipc_handlers.begin");
+        setup_ipc_handlers();
+        logger_->info("[init] stage=ipc_handlers.ok");
+
+        if (options_.role == "service") {
+            bool enable_process_manager = configuration_.get_bool("process_manager.enabled", true);
+            if (const char* env_disable_pm = std::getenv("CLINK_DISABLE_PROCESS_MANAGER")) {
+                if (std::string(env_disable_pm) == "1") {
+                    enable_process_manager = false;
+                }
+            }
+
+            logger_->info(std::string("[init] stage=process_manager.enabled=") + (enable_process_manager ? "true" : "false"));
+
+            if (enable_process_manager) {
+                logger_->info("[init] stage=process_manager.create.begin");
+                auto pm = std::make_shared<clink::server::modules::ProcessManager>(io_context_, logger_, session_manager_);
+                logger_->info("[init] stage=process_manager.create.ok");
+
+                logger_->info("[init] stage=process_manager.start.begin");
+                if (pm->start(configuration_)) {
+                    process_manager_ = pm;
+                    logger_->info("[init] stage=process_manager.start.ok");
+                } else {
+                    logger_->warn("[init] stage=process_manager.start.failed_return_false");
+                }
+            } else {
+                logger_->warn("[init] stage=process_manager.skip.disabled");
+            }
+        }
+
+        if (options_.auto_reload_config) {
+            logger_->info("[init] stage=auto_reload.begin");
+            set_auto_reload(true);
+            logger_->info("[init] stage=auto_reload.ok");
+        }
+    } catch (const std::exception& e) {
+        logger_->error(std::string("[init] failed with exception: ") + e.what());
+        throw;
     }
 }
 
 void Application::apply_configuration() {
+    bool vif_enabled = configuration_.get_bool("network.virtual_interface.enabled", true);
+    if (const char* env_disable_vif = std::getenv("CLINK_DISABLE_VIF")) {
+        if (std::string(env_disable_vif) == "1") {
+            vif_enabled = false;
+        }
+    }
+
     if (!session_manager_) {
+        logger_->info("[apply] stage=session_manager.create.begin");
         session_manager_ = network::create_session_manager(io_context_, logger_);
-        if (session_manager_) {
-            session_manager_->initialize();
+        if (!session_manager_) {
+            logger_->error("[apply] stage=session_manager.create.failed");
+            logger_->warn("[apply] session manager unavailable, continue in degraded mode");
+        } else {
+            logger_->info("[apply] stage=session_manager.create.ok");
+
+            if (auto* impl = dynamic_cast<network::DefaultSessionManager*>(session_manager_.get())) {
+                impl->set_virtual_interface_enabled(vif_enabled);
+                logger_->info(std::string("[apply] stage=session_manager.vif.preinit=") + (vif_enabled ? "true" : "false"));
+            }
+
+            logger_->info("[apply] stage=session_manager.initialize.begin");
+            auto init_ec = session_manager_->initialize();
+            if (init_ec) {
+                logger_->error("[apply] stage=session_manager.initialize.failed: " + init_ec.message());
+                logger_->warn("[apply] session manager init reported error, continue in degraded mode");
+            } else {
+                logger_->info("[apply] stage=session_manager.initialize.ok");
+            }
         }
     }
 
@@ -101,6 +165,9 @@ void Application::apply_configuration() {
         if (impl) {
             impl->set_acl(std::move(acl));
             impl->set_policy_engine(policy_engine_);
+
+            impl->set_virtual_interface_enabled(vif_enabled);
+            logger_->info(std::string("[apply] stage=session_manager.vif.enabled=") + (vif_enabled ? "true" : "false"));
         }
 
         // 2. 应用全局带宽限制
@@ -115,32 +182,40 @@ void Application::apply_configuration() {
         std::string endpoint = configuration_.get_string("network.listen_endpoint", "0.0.0.0:443");
         if (!endpoint.empty()) {
             std::unique_ptr<network::TransportListener> listener;
-            
+            logger_->info("[apply] stage=listener.prepare endpoint=" + endpoint);
+
             if (endpoint.rfind("tls://", 0) == 0) {
                 auto tls_listener = std::make_unique<network::TlsTransportListener>(io_context_, logger_);
-                
-                // 加载 TLS 证书配置
+
                 std::string ca_cert = configuration_.get_string("network.tls.ca_cert", "config/certs/ca.crt");
                 std::string server_cert = configuration_.get_string("network.tls.server_cert", "config/certs/server.crt");
                 std::string server_key = configuration_.get_string("network.tls.server_key", "config/certs/server.key");
-                
+                logger_->info("[apply] stage=listener.tls.certs ca=" + ca_cert + " cert=" + server_cert + " key=" + server_key);
+
                 tls_listener->set_certificates(ca_cert, server_cert, server_key);
 
-                // 加载证书绑定 (Certificate Binding) 配置 - 用于限制允许连接的客户端证书
                 if (configuration_.contains("network.tls.pinned_client_cert")) {
-                    tls_listener->set_pinned_certificate_hash(configuration_.get_string("network.tls.pinned_client_cert"));
+                    const auto pinned = configuration_.get_string("network.tls.pinned_client_cert");
+                    logger_->info("[apply] stage=listener.tls.pinned_client_cert.set");
+                    tls_listener->set_pinned_certificate_hash(pinned);
                 }
 
                 listener = std::move(tls_listener);
                 endpoint = endpoint.substr(6); // 移除 tls://
+                logger_->info("[apply] stage=listener.transport tls endpoint=" + endpoint);
             } else {
                 listener = std::make_unique<network::TcpTransportListener>(io_context_, logger_);
                 if (endpoint.rfind("tcp://", 0) == 0) {
                     endpoint = endpoint.substr(6);
                 }
+                logger_->info("[apply] stage=listener.transport tcp endpoint=" + endpoint);
             }
-            
+
+            logger_->info("[apply] stage=listener.start.begin endpoint=" + endpoint);
             session_manager_->start_listen(std::move(listener), endpoint);
+            logger_->info("[apply] stage=listener.start.ok endpoint=" + endpoint);
+        } else {
+            logger_->warn("[apply] stage=listener.skip.empty_endpoint");
         }
     }
 
@@ -309,49 +384,59 @@ void Application::setup_ipc_handlers() {
                 return "{\"ok\":false,\"command\":\"" + command + "\",\"error\":\"" + json_escape(message) + "\"}";
             };
 
-            if (req.command == "reload") {
-                reload_configuration();
-                return {ipc::MessageType::Response, "reload", ok_payload("reload", "{\"status\":\"ok\"}")};
-            }
-            if (req.command == "status") {
-                return {ipc::MessageType::Response, "status", ok_payload("status", get_session_status())};
-            }
-            if (req.command == "connect") {
-                connect_session();
-                return {ipc::MessageType::Response, "connect", ok_payload("connect", "{\"status\":\"connecting\"}")};
-            }
-            if (req.command == "disconnect") {
-                disconnect_session();
-                return {ipc::MessageType::Response, "disconnect", ok_payload("disconnect", "{\"status\":\"disconnecting\"}")};
-            }
-            if (req.command == "logs") {
-                std::string log_path = "logs/clink-daemon.log";
-                std::ifstream log_file(log_path, std::ios::binary);
-                if (!log_file.is_open()) {
-                    return {ipc::MessageType::Response, "logs", error_payload("logs", "failed to open log file")};
+            try {
+                if (req.command == "reload") {
+                    reload_configuration();
+                    return {ipc::MessageType::Response, "reload", ok_payload("reload", "{\"status\":\"ok\"}")};
                 }
-
-                log_file.seekg(0, std::ios::end);
-                std::streamoff end_pos = log_file.tellg();
-                std::streamoff start_pos = (end_pos > 2000) ? (end_pos - 2000) : 0;
-
-                log_file.seekg(start_pos);
-                std::string content((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
-
-                if (start_pos > 0) {
-                    auto first_newline = content.find('\n');
-                    if (first_newline != std::string::npos) {
-                        content = content.substr(first_newline + 1);
+                if (req.command == "status") {
+                    return {ipc::MessageType::Response, "status", ok_payload("status", get_session_status())};
+                }
+                if (req.command == "connect") {
+                    const auto connect_result = connect_session(req.payload);
+                    return {ipc::MessageType::Response, "connect", ok_payload("connect", connect_result)};
+                }
+                if (req.command == "disconnect") {
+                    disconnect_session();
+                    return {ipc::MessageType::Response, "disconnect", ok_payload("disconnect", "{\"status\":\"disconnecting\"}")};
+                }
+                if (req.command == "logs") {
+                    std::string log_path = "logs/clink-daemon.log";
+                    std::ifstream log_file(log_path, std::ios::binary);
+                    if (!log_file.is_open()) {
+                        return {ipc::MessageType::Response, "logs", error_payload("logs", "failed to open log file")};
                     }
-                }
 
-                return {
-                    ipc::MessageType::Response,
-                    "logs",
-                    ok_payload("logs", "{\"content\":\"" + json_escape(content) + "\"}")
-                };
+                    log_file.seekg(0, std::ios::end);
+                    std::streamoff end_pos = log_file.tellg();
+                    std::streamoff start_pos = (end_pos > 2000) ? (end_pos - 2000) : 0;
+
+                    log_file.seekg(start_pos);
+                    std::string content((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
+
+                    if (start_pos > 0) {
+                        auto first_newline = content.find('\n');
+                        if (first_newline != std::string::npos) {
+                            content = content.substr(first_newline + 1);
+                        }
+                    }
+
+                    return {
+                        ipc::MessageType::Response,
+                        "logs",
+                        ok_payload("logs", "{\"content\":\"" + json_escape(content) + "\"}")
+                    };
+                }
+                return {ipc::MessageType::Response, req.command, error_payload(req.command, "unknown command")};
+            } catch (const std::exception& ex) {
+                logger_->error(std::string("[ipc] handler exception command=") + req.command + " error=" + ex.what());
+                return {ipc::MessageType::Response, req.command,
+                        error_payload(req.command, std::string("handler_exception: ") + ex.what())};
+            } catch (...) {
+                logger_->error(std::string("[ipc] handler unknown exception command=") + req.command);
+                return {ipc::MessageType::Response, req.command,
+                        error_payload(req.command, "handler_exception: unknown")};
             }
-            return {ipc::MessageType::Response, req.command, error_payload(req.command, "unknown command")};
         });
     }
 }
@@ -367,7 +452,7 @@ void Application::run() {
     }
 
     log_lifecycle("entering event loop");
-    
+
     // Start Asio I/O thread
     io_thread_ = std::thread([this]() {
         logger_->info("[app] asio io_context started");
@@ -384,27 +469,32 @@ void Application::run() {
     }
 
     log_lifecycle("event loop exited");
-    stop_modules();
+    // Modules are stopped by shutdown() to avoid duplicate stop during signal-driven shutdown.
 }
 
 void Application::shutdown(std::chrono::milliseconds /*timeout*/) {
+    bool expected_shutdown = false;
+    if (!shutdown_called_.compare_exchange_strong(expected_shutdown, true)) {
+        return; // already shut down (or shutting down)
+    }
+
     if (!initialized_) {
         return;
     }
 
-    bool expected = true;
-    if (running_.compare_exchange_strong(expected, false)) {
-        log_lifecycle("shutting down subsystems");
+    running_.store(false);
+    log_lifecycle("shutting down subsystems");
 
-        // Stop Asio
-        io_work_.reset();
-        io_context_.stop();
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
+    // Stop modules first, then I/O thread/resources
+    stop_modules();
 
-        stop_modules();
-    
+    // Stop Asio
+    io_work_.reset();
+    io_context_.stop();
+    if (io_thread_.joinable()) {
+        io_thread_.join();
+    }
+
     if (session_manager_) {
         session_manager_->shutdown();
     }
@@ -414,7 +504,6 @@ void Application::shutdown(std::chrono::milliseconds /*timeout*/) {
 #endif
 
     log_lifecycle("shutdown complete");
-    }
 }
 
 void Application::log_lifecycle(const std::string& stage) const {
@@ -541,70 +630,235 @@ std::string Application::get_session_status() const {
     return result;
 }
 
-void Application::connect_session() {
+std::string Application::connect_session(const std::string& endpoint_override) {
+    using json = nlohmann::json;
+    logger_->info("[connect.stage] enter payload_bytes=" + std::to_string(endpoint_override.size()));
+
+    auto parse_override = [](const std::string& raw) {
+        struct Override {
+            std::string endpoint;
+            std::string transport;
+            int timeout_ms = 0;
+            bool no_self_check = false;
+        } out;
+
+        if (raw.empty()) return out;
+
+        auto j = json::parse(raw, nullptr, false);
+        if (j.is_discarded() || !j.is_object()) {
+            // Backward compatible: raw may be a plain endpoint string
+            out.endpoint = raw;
+            return out;
+        }
+
+        if (j.contains("endpoint") && j.at("endpoint").is_string()) {
+            out.endpoint = j.at("endpoint").get<std::string>();
+        }
+        if (j.contains("transport") && j.at("transport").is_string()) {
+            out.transport = j.at("transport").get<std::string>();
+        }
+        if (j.contains("timeout_ms") && j.at("timeout_ms").is_number_integer()) {
+            out.timeout_ms = j.at("timeout_ms").get<int>();
+        }
+        if (j.contains("no_self_check") && j.at("no_self_check").is_boolean()) {
+            out.no_self_check = j.at("no_self_check").get<bool>();
+        }
+        return out;
+    };
+
     auto tracer = observability::Telemetry::get_tracer("clink-app");
     observability::ScopedSpan span(tracer->start_span("connect_session"));
+
+    auto make_result = [](bool accepted, std::string status, std::string reason,
+                          std::string message = "", std::string endpoint = "", std::string session_id = "") {
+        json data;
+        data["accepted"] = accepted;
+        data["status"] = std::move(status);
+        data["reason"] = std::move(reason);
+        if (!message.empty()) data["message"] = std::move(message);
+        if (!endpoint.empty()) data["endpoint"] = std::move(endpoint);
+        if (!session_id.empty()) data["session_id"] = std::move(session_id);
+        return data.dump();
+    };
 
     if (session_state_.load() != SessionState::Disconnected) {
         logger_->warn("Cannot connect: session is already active or in transition");
         span->add_event("connection_aborted_active_session");
-        return;
+        logger_->info("connect.final status=rejected reason=session_not_disconnected");
+        return make_result(false, "rejected", "session_not_disconnected");
     }
 
-    if (session_manager_) {
-        // 1. 获取目标地址
-        std::string endpoint = configuration_.get_string("client.remote_endpoint");
-        if (endpoint.empty()) {
-            logger_->error("[app] cannot connect: client.remote_endpoint not set");
-            span->set_attribute("error", "missing_endpoint");
-            return;
+    if (!session_manager_) {
+        logger_->error("[app] cannot connect: session manager unavailable");
+        span->set_attribute("error", "no_session_manager");
+        logger_->info("connect.final status=rejected reason=no_session_manager");
+        return make_result(false, "rejected", "no_session_manager");
+    }
+
+    logger_->info("[connect.stage] parse_override.begin");
+    const auto ov = parse_override(endpoint_override);
+    logger_->info("[connect.stage] parse_override.ok endpoint_present=" + std::string(ov.endpoint.empty() ? "false" : "true") +
+                  " transport_override=" + (ov.transport.empty() ? std::string("none") : ov.transport));
+
+    std::string endpoint = ov.endpoint;
+    if (endpoint.empty()) {
+        endpoint = configuration_.get_string("client.remote_endpoint");
+    }
+    if (endpoint.empty()) {
+        logger_->error("[app] cannot connect: endpoint not set (payload/config both empty)");
+        span->set_attribute("error", "missing_endpoint");
+        logger_->info("connect.final status=rejected reason=missing_endpoint");
+        return make_result(false, "rejected", "missing_endpoint");
+    }
+
+    auto normalize_endpoint = [](std::string ep) {
+        std::string transport = "tcp";
+        if (ep.rfind("tls://", 0) == 0) {
+            transport = "tls";
+            ep = ep.substr(6);
+        } else if (ep.rfind("tcp://", 0) == 0) {
+            ep = ep.substr(6);
         }
-        span->set_attribute("endpoint", endpoint);
+        return std::pair<std::string, std::string>{transport, ep};
+    };
 
-        session_state_ = SessionState::Connecting;
-        logger_->info("Starting session connection to " + endpoint);
+    if (!ov.transport.empty() && (ov.transport == "tcp" || ov.transport == "tls")) {
+        auto [existing_transport, hostport] = normalize_endpoint(endpoint);
+        (void)existing_transport;
+        endpoint = ov.transport + "://" + hostport;
+    }
 
-        // 2. 创建适配器
-        std::unique_ptr<network::TransportAdapter> adapter;
-        if (endpoint.rfind("tls://", 0) == 0) {
-            span->set_attribute("transport", "tls");
-            auto tls_adapter = std::make_unique<network::TlsTransportAdapter>(io_context_, logger_);
-            
-            // 加载 TLS 证书配置
-            std::string ca_cert = configuration_.get_string("network.tls.ca_cert", "config/certs/ca.crt");
-            std::string client_cert = configuration_.get_string("network.tls.client_cert", "config/certs/client.crt");
-            std::string client_key = configuration_.get_string("network.tls.client_key", "config/certs/client.key");
-            
-            tls_adapter->set_certificates(ca_cert, client_cert, client_key);
-            adapter = std::move(tls_adapter);
-            endpoint = endpoint.substr(6);
-        } else {
-            span->set_attribute("transport", "tcp");
-            adapter = std::make_unique<network::TcpTransportAdapter>(io_context_, logger_);
-            if (endpoint.rfind("tcp://", 0) == 0) {
-                endpoint = endpoint.substr(6);
+    auto [target_transport, target_hostport] = normalize_endpoint(endpoint);
+    logger_->info("[connect.stage] normalized_target transport=" + target_transport + " hostport=" + target_hostport);
+    auto target_colon = target_hostport.rfind(':');
+    std::string target_host = (target_colon == std::string::npos) ? "" : target_hostport.substr(0, target_colon);
+    std::string target_port = (target_colon == std::string::npos) ? "" : target_hostport.substr(target_colon + 1);
+
+    if (options_.role == "service") {
+        bool allow_self_connect_debug = configuration_.get_bool("network.allow_self_connect_for_debug", false);
+        if (const char* env_allow = std::getenv("CLINK_ALLOW_SELF_CONNECT_DEBUG")) {
+            if (std::string(env_allow) == "1") {
+                allow_self_connect_debug = true;
             }
         }
 
-        // 3. 发起连接
-        span->add_event("transport_starting");
-        auto err = adapter->start(endpoint);
-        if (err) {
-            logger_->error("[app] failed to start transport to " + endpoint + ": " + err.message());
-            span->set_attribute("error", err.message());
-            session_state_ = SessionState::Disconnected;
-            return;
-        }
-        span->add_event("transport_connected");
+        std::string listen_ep = configuration_.get_string("network.listen_endpoint", "");
+        auto [listen_transport, listen_hostport] = normalize_endpoint(listen_ep);
+        logger_->info("[connect.stage] normalized_listener transport=" + listen_transport + " hostport=" + listen_hostport);
+        auto listen_colon = listen_hostport.rfind(':');
+        std::string listen_host = (listen_colon == std::string::npos) ? "" : listen_hostport.substr(0, listen_colon);
+        std::string listen_port = (listen_colon == std::string::npos) ? "" : listen_hostport.substr(listen_colon + 1);
 
-        // 4. 创建会话
-        session_manager_->create_session(std::move(adapter));
-        session_id_ = "sess_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 10000);
-        span->set_attribute("session_id", session_id_);
-        session_state_ = SessionState::Connected;
-        logger_->info("Session connected: " + session_id_);
-        span->add_event("session_active");
+        if (!listen_transport.empty() && !target_transport.empty() && listen_transport != target_transport) {
+            bool allow_mismatch = false;
+            if (const char* env_allow = std::getenv("CLINK_ALLOW_TRANSPORT_MISMATCH")) {
+                if (std::string(env_allow) == "1") {
+                    allow_mismatch = true;
+                }
+            }
+
+            if (!allow_mismatch) {
+                logger_->warn("[app] connect rejected: transport mismatch (target=" + target_transport + ", listener=" + listen_transport + ")");
+                span->set_attribute("error", "transport_mismatch");
+                const std::string msg = "target transport does not match listener transport (listener=" + listen_transport + ")";
+                logger_->info("connect.final status=rejected reason=transport_mismatch endpoint=" + endpoint);
+                return make_result(false, "rejected", "transport_mismatch", msg, endpoint);
+            }
+
+            logger_->warn("[app] transport mismatch allowed by env override (CLINK_ALLOW_TRANSPORT_MISMATCH=1)");
+        }
+
+        auto is_local_host = [](const std::string& h) {
+            return h == "127.0.0.1" || h == "localhost" || h == "0.0.0.0" || h == "::1" || h == "::";
+        };
+
+        const bool self_connect = !target_port.empty() && target_port == listen_port &&
+                                  target_transport == listen_transport &&
+                                  is_local_host(target_host) && is_local_host(listen_host);
+
+        if (ov.no_self_check) {
+            allow_self_connect_debug = true;
+        }
+
+        if (self_connect && !allow_self_connect_debug) {
+            logger_->error("[app] connect aborted: endpoint resolves to local listener (self-connect loop risk): " + endpoint);
+            span->set_attribute("error", "self_connect_blocked");
+            logger_->info("connect.final status=rejected reason=self_connect_blocked endpoint=" + endpoint);
+            return make_result(false, "rejected", "self_connect_blocked", "endpoint resolves to local listener", endpoint);
+        }
+
+        if (self_connect && allow_self_connect_debug) {
+            logger_->warn("[app] self-connect debug override enabled, proceeding: " + endpoint);
+        }
     }
+
+    span->set_attribute("endpoint", endpoint);
+
+    session_state_ = SessionState::Connecting;
+    logger_->info("[connect.stage] state=connecting endpoint=" + endpoint);
+    logger_->info("Starting session connection to " + endpoint);
+
+    network::TransportAdapterPtr adapter;
+    if (endpoint.rfind("tls://", 0) == 0) {
+        logger_->info("[connect.stage] adapter.select tls");
+        span->set_attribute("transport", "tls");
+        auto tls_adapter = std::make_shared<network::TlsTransportAdapter>(io_context_, logger_);
+
+        std::string ca_cert = configuration_.get_string("network.tls.ca_cert", "config/certs/ca.crt");
+        std::string client_cert = configuration_.get_string("network.tls.client_cert", "config/certs/client.crt");
+        std::string client_key = configuration_.get_string("network.tls.client_key", "config/certs/client.key");
+
+        tls_adapter->set_certificates(ca_cert, client_cert, client_key);
+        adapter = tls_adapter;
+        endpoint = endpoint.substr(6);
+    } else {
+        logger_->info("[connect.stage] adapter.select tcp");
+        span->set_attribute("transport", "tcp");
+        adapter = std::make_shared<network::TcpTransportAdapter>(io_context_, logger_);
+        if (endpoint.rfind("tcp://", 0) == 0) {
+            endpoint = endpoint.substr(6);
+        }
+    }
+
+    span->add_event("transport_starting");
+    logger_->info("[connect.stage] transport.start.begin endpoint=" + endpoint);
+    auto err = adapter->start(endpoint);
+    if (err) {
+        logger_->error("[app] failed to start transport to " + endpoint + ": " + err.message());
+        span->set_attribute("error", err.message());
+        session_state_ = SessionState::Disconnected;
+        logger_->info("connect.final status=failed reason=transport_start_failed endpoint=" + endpoint);
+        return make_result(false, "failed", "transport_start_failed", err.message(), endpoint);
+    }
+    span->add_event("transport_connected");
+    logger_->info("[connect.stage] transport.start.ok endpoint=" + endpoint);
+
+    try {
+        logger_->info("[connect.stage] session.create.begin endpoint=" + endpoint);
+        session_manager_->create_session(adapter);
+        logger_->info("[connect.stage] session.create.ok endpoint=" + endpoint);
+    } catch (const std::exception& ex) {
+        logger_->error(std::string("[app] create_session failed: ") + ex.what());
+        span->set_attribute("error", ex.what());
+        session_state_ = SessionState::Disconnected;
+        logger_->info("connect.final status=failed reason=create_session_exception endpoint=" + endpoint);
+        return make_result(false, "failed", "create_session_exception", ex.what(), endpoint);
+    } catch (...) {
+        logger_->error("[app] create_session failed: unknown exception");
+        span->set_attribute("error", "create_session_exception_unknown");
+        session_state_ = SessionState::Disconnected;
+        logger_->info("connect.final status=failed reason=create_session_exception_unknown endpoint=" + endpoint);
+        return make_result(false, "failed", "create_session_exception_unknown", "unknown exception", endpoint);
+    }
+
+    session_id_ = "sess_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 10000);
+    span->set_attribute("session_id", session_id_);
+    session_state_ = SessionState::Connected;
+    logger_->info("[connect.stage] state=connected session_id=" + session_id_);
+    logger_->info("Session connected: " + session_id_);
+    logger_->info("connect.final status=connected session_id=" + session_id_ + " endpoint=" + endpoint);
+    span->add_event("session_active");
+    return make_result(true, "connected", "none", "", endpoint, session_id_);
 }
 
 void Application::disconnect_session() {
