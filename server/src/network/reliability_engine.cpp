@@ -1,12 +1,37 @@
 #include "server/include/clink/core/network/reliability_engine.hpp"
 #include "server/include/clink/core/network/packet.hpp"
 #include <algorithm>
+#include <sstream>
+#include <thread>
+
+namespace {
+std::string tid_str() {
+    std::ostringstream oss;
+    oss << std::this_thread::get_id();
+    return oss.str();
+}
+}
 
 namespace clink::core::network {
 
 ReliabilityEngine::ReliabilityEngine(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger, SendFunction send_fn)
     : io_context_(io_context), logger_(std::move(logger)), send_fn_(std::move(send_fn)),
-      rate_limiter_(std::make_unique<RateLimiter>(0, 0)), timer_(io_context) {
+      rate_limiter_(nullptr), timer_(nullptr) {
+    if (logger_) logger_->info("[reliability.stage] ctor.enter tid=" + tid_str());
+    try {
+        if (logger_) logger_->info("[reliability.stage] ctor.rate_limiter.create.begin tid=" + tid_str());
+        rate_limiter_ = std::make_unique<RateLimiter>(0, 0);
+        if (logger_) logger_->info("[reliability.stage] ctor.rate_limiter.create.ok tid=" + tid_str());
+
+        if (logger_) logger_->info("[reliability.stage] ctor.timer.defer tid=" + tid_str());
+        if (logger_) logger_->info("[reliability.stage] ctor.exit.ok tid=" + tid_str());
+    } catch (const std::exception& ex) {
+        if (logger_) logger_->error(std::string("[reliability.stage] ctor.exception: ") + ex.what());
+        throw;
+    } catch (...) {
+        if (logger_) logger_->error("[reliability.stage] ctor.exception: unknown");
+        throw;
+    }
 }
 
 ReliabilityEngine::~ReliabilityEngine() {
@@ -18,28 +43,76 @@ void ReliabilityEngine::report_corrupted_packet() {
     stats_.corrupted_packets++;
 }
 
-void ReliabilityEngine::start() {
-    if (running_) return;
-    running_ = true;
-    start_timer();
+void ReliabilityEngine::ensure_timer() {
+    if (logger_) logger_->info("[reliability] timer.ensure.enter tid=" + tid_str());
+    std::call_once(timer_once_, [this]() {
+        if (logger_) logger_->info("[reliability] timer.ensure.once.begin tid=" + tid_str());
+        timer_ = std::make_unique<asio::steady_timer>(io_context_);
+        if (logger_) logger_->info("[reliability] timer.ensure.once.ok tid=" + tid_str());
+    });
+    if (logger_) logger_->info("[reliability] timer.ensure.exit tid=" + tid_str());
+}
+
+void ReliabilityEngine::start_async(std::function<void(std::error_code)> on_started) {
+    if (logger_) logger_->info("[reliability] start_async.post tid=" + tid_str());
+
+    auto self = shared_from_this();
+    asio::post(io_context_, [self, cb = std::move(on_started)]() mutable {
+        if (self->logger_) self->logger_->info("[reliability] start.begin tid=" + tid_str());
+
+        if (self->running_) {
+            if (self->logger_) self->logger_->info("[reliability.stage] start.skip_already_running tid=" + tid_str());
+            if (cb) cb({});
+            return;
+        }
+
+        try {
+            self->ensure_timer();
+            self->running_ = true;
+            if (self->logger_) self->logger_->info("[reliability.stage] start.timer.begin tid=" + tid_str());
+            self->start_timer();
+            if (self->logger_) self->logger_->info("[reliability] start.ok tid=" + tid_str());
+            if (cb) cb({});
+        } catch (...) {
+            if (self->logger_) self->logger_->error("[reliability] start.exception tid=" + tid_str());
+            if (cb) cb(std::make_error_code(std::errc::operation_canceled));
+        }
+    });
 }
 
 void ReliabilityEngine::stop() {
     running_ = false;
-    timer_.cancel();
+    ensure_timer();
+    if (timer_) {
+        timer_->cancel();
+    }
 }
 
 void ReliabilityEngine::start_timer() {
-    if (!running_) return;
+    ensure_timer();
+    if (!running_) {
+        if (logger_) logger_->info("[reliability.stage] timer.skip_not_running tid=" + tid_str());
+        return;
+    }
 
-    timer_.expires_after(std::chrono::milliseconds(50));
+    if (!timer_) {
+        if (logger_) logger_->error("[reliability.stage] timer.missing tid=" + tid_str());
+        return;
+    }
+
+    if (logger_) logger_->info("[reliability.stage] timer.schedule tid=" + tid_str());
+    timer_->expires_after(std::chrono::milliseconds(50));
     auto self = shared_from_this();
-    timer_.async_wait([self](std::error_code ec) {
-        if (ec) return;
+    timer_->async_wait([self](std::error_code ec) {
+        if (ec) {
+            if (self->logger_) self->logger_->info(std::string("[reliability.stage] timer.wait.cancelled ec=") + ec.message());
+            return;
+        }
 
         auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(self->queue_mutex_);
-        
+        if (self->logger_) self->logger_->info("[reliability.stage] timer.tick unacked=" + std::to_string(self->unacked_packets_.size()));
+
         for (auto& [seq, entry] : self->unacked_packets_) {
             // 1. 处理尚未进行初始发送的包 (受限于 CWND 和速率)
             if (!entry.sent) {

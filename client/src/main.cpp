@@ -3,6 +3,7 @@
 #include "server/include/clink/core/security/dpapi_helper.hpp"
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
@@ -39,7 +40,13 @@ void print_usage() {
     Terminal::println("CLINK CLI", Color::BrightCyan);
     Terminal::println("Usage: clink-cli [options] <command>");
     Terminal::println("\nOptions:");
-    Terminal::println("  -c, --config <path>  Path to configuration file");
+    Terminal::println("  -c, --config <path>      Path to configuration file");
+    Terminal::println("      --ip <address>       Override remote server address for connect");
+    Terminal::println("      --port <port>        Override remote server port for connect");
+    Terminal::println("      --transport <type>   tcp|tls (connect only, default: tls)");
+    Terminal::println("      --timeout <ms>       Connect timeout hint (connect only)");
+    Terminal::println("      --no-self-check      Allow self-connect check bypass (debug)");
+    Terminal::println("      --allow-all          Auto fallback/retry without confirmation");
     Terminal::println("\nCommands:");
     Terminal::print("  connect     ", Color::Green);
     Terminal::println("Bring up a session");
@@ -75,7 +82,7 @@ std::string_view find_first_command(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string_view arg{argv[i]};
         if (arg.rfind("-", 0) == 0) {
-            if ((arg == "--config" || arg == "-c") && i + 1 < argc) {
+            if ((arg == "--config" || arg == "-c" || arg == "--ip" || arg == "--port" || arg == "--transport" || arg == "--timeout") && i + 1 < argc) {
                 ++i;
             }
             continue;
@@ -166,9 +173,38 @@ void print_status_table(const json& payload) {
         Terminal::println(std::string(80, '-'), Color::White);
     }
 }
-bool send_command_and_print(clink::core::ipc::IpcClient& client, const std::string& command) {
-    auto response = client.send_request({clink::core::ipc::MessageType::Request, command, ""});
+bool send_command_and_print(clink::core::ipc::IpcClient& client, const std::string& command, const std::string& payload = "") {
+    auto response = client.send_request({clink::core::ipc::MessageType::Request, command, payload});
     const auto envelope = parse_response_envelope(response.payload);
+
+    if (command == "connect" && envelope.ok) {
+        const bool accepted = jget<bool>(envelope.data, "accepted", true);
+        const std::string status = jget<std::string>(envelope.data, "status", "unknown");
+        const std::string reason = jget<std::string>(envelope.data, "reason", "");
+        const std::string message = jget<std::string>(envelope.data, "message", "");
+        const std::string endpoint = jget<std::string>(envelope.data, "endpoint", "");
+
+        Terminal::print("Connect result: ", Color::BrightWhite);
+        if (accepted) {
+            Terminal::println(status, Color::Green);
+        } else {
+            Terminal::println(status, Color::Yellow);
+            if (!reason.empty()) {
+                Terminal::println("  reason: " + reason, Color::Yellow);
+            }
+            if (!message.empty()) {
+                Terminal::println("  message: " + message, Color::Yellow);
+            }
+            if (!endpoint.empty()) {
+                Terminal::println("  endpoint: " + endpoint, Color::Yellow);
+            }
+        }
+
+        Terminal::print("Response: ", Color::BrightWhite);
+        Terminal::println(envelope.raw, accepted ? Color::Green : Color::Yellow);
+        return accepted;
+    }
+
     Terminal::print("Response: ", Color::BrightWhite);
     if (envelope.ok) {
         Terminal::println(envelope.raw, Color::Green);
@@ -329,6 +365,89 @@ int handle_encrypt(int argc, char** argv) {
         return 1;
     }
 }
+
+struct ConnectCliOptions {
+    std::string ip{"127.0.0.1"};
+    std::string port{"4433"};
+    std::string transport{"tls"};
+    int timeout_ms{0};
+    bool no_self_check{false};
+    bool allow_all{false};
+    bool transport_explicit{false};
+    bool has_override{false};
+};
+
+ConnectCliOptions parse_connect_cli_options(int argc, char** argv) {
+    ConnectCliOptions opts;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg{argv[i]};
+        if (arg == "--ip" && i + 1 < argc) {
+            opts.ip = argv[++i];
+            opts.has_override = true;
+        } else if (arg == "--port" && i + 1 < argc) {
+            opts.port = argv[++i];
+            opts.has_override = true;
+        } else if (arg == "--transport" && i + 1 < argc) {
+            opts.transport = argv[++i];
+            opts.transport_explicit = true;
+            opts.has_override = true;
+        } else if (arg == "--timeout" && i + 1 < argc) {
+            try {
+                opts.timeout_ms = std::stoi(argv[++i]);
+                if (opts.timeout_ms < 0) opts.timeout_ms = 0;
+            } catch (...) {
+                opts.timeout_ms = 0;
+            }
+            opts.has_override = true;
+        } else if (arg == "--no-self-check") {
+            opts.no_self_check = true;
+            opts.has_override = true;
+        } else if (arg == "--allow-all") {
+            opts.allow_all = true;
+        } else if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
+            ++i;
+        }
+    }
+
+    if (opts.transport != "tls" && opts.transport != "tcp") {
+        opts.transport = "tls";
+    }
+
+    return opts;
+}
+
+std::string build_connect_payload(const ConnectCliOptions& opts, const std::string& transport_override = "") {
+    std::string transport = transport_override.empty() ? opts.transport : transport_override;
+    nlohmann::json payload;
+    payload["endpoint"] = transport + "://" + opts.ip + ":" + opts.port;
+    payload["transport"] = transport;
+    if (opts.timeout_ms > 0) {
+        payload["timeout_ms"] = opts.timeout_ms;
+    }
+    if (opts.no_self_check) {
+        payload["no_self_check"] = true;
+    }
+    if (opts.allow_all) {
+        payload["allow_all"] = true;
+    }
+    return payload.dump();
+}
+
+bool prompt_yes_no(const std::string& question, bool default_yes = false) {
+    Terminal::print(question, Color::Yellow);
+    Terminal::print(default_yes ? " [Y/n]: " : " [y/N]: ", Color::Yellow);
+    std::string input;
+    std::getline(std::cin, input);
+
+    if (input.empty()) {
+        return default_yes;
+    }
+
+    const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(input[0])));
+    return c == 'y';
+}
+
 }// namespace
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -365,7 +484,66 @@ int main(int argc, char** argv) {
             Terminal::println(" request to daemon...", Color::Cyan);
             auto& client = app.ipc_client();
             client.connect(kIpcPipe);
-            send_command_and_print(client, std::string(command));
+
+            if (command == "connect") {
+                const auto connect_opts = parse_connect_cli_options(argc, argv);
+
+                auto try_connect_with_transport = [&](const std::string& transport, const std::string& label) -> bool {
+                    const std::string payload = build_connect_payload(connect_opts, transport);
+                    Terminal::println("Connect target: " + transport + "://" + connect_opts.ip + ":" + connect_opts.port, Color::Yellow);
+
+                    auto response = client.send_request({clink::core::ipc::MessageType::Request, "connect", payload});
+                    auto envelope = parse_response_envelope(response.payload);
+
+                    if (!envelope.ok) {
+                        Terminal::println(label + " connect failed at IPC/application layer.", Color::Yellow);
+                        Terminal::println("  error: " + (envelope.error.empty() ? envelope.raw : envelope.error), Color::Yellow);
+                        return false;
+                    }
+
+                    const bool accepted = jget<bool>(envelope.data, "accepted", false);
+                    const std::string status = jget<std::string>(envelope.data, "status", "unknown");
+                    const std::string reason = jget<std::string>(envelope.data, "reason", "");
+                    const std::string message = jget<std::string>(envelope.data, "message", "");
+
+                    Terminal::print(label + " connect result: ", Color::BrightWhite);
+                    Terminal::println(status, accepted ? Color::Green : Color::Yellow);
+                    if (!reason.empty()) Terminal::println("  reason: " + reason, Color::Yellow);
+                    if (!message.empty()) Terminal::println("  message: " + message, Color::Yellow);
+                    Terminal::print("Response: ", Color::BrightWhite);
+                    Terminal::println(envelope.raw, accepted ? Color::Green : Color::Yellow);
+                    return accepted;
+                };
+
+                if (connect_opts.transport_explicit) {
+                    const bool accepted = try_connect_with_transport(connect_opts.transport, connect_opts.transport == "tls" ? "TLS" : "TCP");
+                    rc = accepted ? 0 : 1;
+                } else {
+                    const bool tls_ok = try_connect_with_transport("tls", "TLS");
+                    if (tls_ok) {
+                        rc = 0;
+                    } else {
+                        Terminal::println("TLS unavailable or rejected. TCP fallback is available.", Color::Yellow);
+
+                        bool do_fallback = false;
+                        if (connect_opts.allow_all) {
+                            do_fallback = true;
+                            Terminal::println("--allow-all enabled, retrying with tcp automatically...", Color::Yellow);
+                        } else {
+                            do_fallback = prompt_yes_no("Retry with tcp://" + connect_opts.ip + ":" + connect_opts.port + " ?", false);
+                        }
+
+                        if (do_fallback) {
+                            const bool tcp_ok = try_connect_with_transport("tcp", "TCP");
+                            rc = tcp_ok ? 0 : 1;
+                        } else {
+                            rc = 1;
+                        }
+                    }
+                }
+            } else {
+                rc = send_command_and_print(client, std::string(command), "") ? 0 : 1;
+            }
         }else {
             std::cerr << "Unknown command: " << command << "\n";
             print_usage();

@@ -339,7 +339,7 @@ void initialize_logging(const LogConfig& config) {
             }
 
             g_default_logger = std::make_shared<spdlog::async_logger>(
-                "cvpn",
+                "clink",
                 sinks.begin(),
                 sinks.end(),
                 spdlog::thread_pool(),
@@ -349,7 +349,7 @@ void initialize_logging(const LogConfig& config) {
             spdlog::set_default_logger(g_default_logger);
             spdlog::flush_every(std::chrono::seconds(config.flush_interval));
         } else {
-            g_default_logger = std::make_shared<spdlog::logger>("cvpn", sinks.begin(), sinks.end());
+            g_default_logger = std::make_shared<spdlog::logger>("clink", sinks.begin(), sinks.end());
             spdlog::set_default_logger(g_default_logger);
         }
 

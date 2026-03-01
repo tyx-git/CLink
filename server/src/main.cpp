@@ -19,8 +19,7 @@ void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
         std::cout << "\nReceived shutdown signal, stopping..." << std::endl;
         if (auto* app = g_app_ptr.load()) {
-            // 使用默认的 5 秒超时
-            app->Application::shutdown(std::chrono::seconds(5));
+            app->request_stop();
         }
     }
 }

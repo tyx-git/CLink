@@ -122,12 +122,21 @@ void TcpTransportAdapter::do_receive() {
 }
 
 void TcpTransportAdapter::do_read_header() {
-    auto self = shared_from_this();
+    auto self = weak_from_this();
+    if (self.expired()) {
+        if (logger_) logger_->error("[tcp] adapter lifetime invalid before read header");
+        stop();
+        return;
+    }
+
     // Use a small buffer for header
     auto block = memory::BufferPool::instance()->acquire(sizeof(PacketHeader));
-    
+
     asio::async_read(socket_, asio::buffer(block->write_ptr(), sizeof(PacketHeader)),
         [this, self, block](std::error_code ec, std::size_t length) mutable {
+            if (self.expired()) {
+                return;
+            }
             if (!ec) {
                 block->commit(length);
                 

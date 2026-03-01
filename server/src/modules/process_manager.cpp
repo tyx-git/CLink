@@ -31,27 +31,6 @@ namespace clink::server::modules {
 namespace clink::server::modules {
 
 namespace {
-void maybe_log_ipc_stats(const std::shared_ptr<clink::core::logging::Logger>& logger, const std::shared_ptr<ProcessManagerImpl>& state, size_t current_sessions) {
-    using namespace std::chrono;
-    const uint64_t now_ms = static_cast<uint64_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
-    const uint64_t prev_ms = state->last_log_ms.load();
-    if ((now_ms - prev_ms) < 5000ULL) return;
-    state->last_log_ms.store(now_ms);
-
-    logger->info(
-        "[process-ipc] packets_total={}connect={}send={}disconnect={}unknown={}dropped_send_no_session={}invalid_connect_addr={}connect_exceptions={}active_sessions={}active_sessions_peak={}",
-        state->packets_total.load(),
-        state->packets_connect.load(),
-        state->packets_send.load(),
-        state->packets_disconnect.load(),
-        state->unknown_packets.load(),
-        state->dropped_send_no_session.load(),
-        state->invalid_connect_addr.load(),
-        state->connect_exceptions.load(),
-        current_sessions,
-        state->active_sessions_peak.load()
-    );
-}
 }
 
 ProcessManager::ProcessManager(asio::io_context& io_context, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager)
