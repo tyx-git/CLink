@@ -1,37 +1,45 @@
 #pragma once
 
 #include "server/include/clink/core/security/auth.hpp"
+#include <unordered_map>
+
+#ifdef _WIN32
 #include <windows.h>
 #include <dpapi.h>
-#include <vector>
+#endif
 
 namespace clink::core::security {
 
 class WindowsCredentialStore : public CredentialStore {
 public:
     bool store_credential(const Credential& cred) override {
+#ifdef _WIN32
         DATA_BLOB input;
         DATA_BLOB output;
-        
+
         input.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(cred.secret.data()));
         input.cbData = static_cast<DWORD>(cred.secret.size());
 
         if (CryptProtectData(&input, L"CLink Credential", nullptr, nullptr, nullptr, 0, &output)) {
-            // In a real implementation, we would write this to a file or registry
-            // For now, we simulate the storage
-            stored_data_[cred.id] = {cred.id, cred.type, 
-                std::string(reinterpret_cast<char*>(output.pbData), output.cbData), 
+            stored_data_[cred.id] = {cred.id, cred.type,
+                std::string(reinterpret_cast<char*>(output.pbData), output.cbData),
                 cred.metadata};
             LocalFree(output.pbData);
             return true;
         }
         return false;
+#else
+        // Linux/macOS fallback: plaintext in-memory store (for compatibility/testing)
+        stored_data_[cred.id] = cred;
+        return true;
+#endif
     }
 
     std::optional<Credential> get_credential(const std::string& id) override {
         auto it = stored_data_.find(id);
         if (it == stored_data_.end()) return std::nullopt;
 
+#ifdef _WIN32
         const auto& encrypted = it->second;
         DATA_BLOB input;
         DATA_BLOB output;
@@ -46,6 +54,9 @@ public:
             return decrypted;
         }
         return std::nullopt;
+#else
+        return it->second;
+#endif
     }
 
     bool remove_credential(const std::string& id) override {

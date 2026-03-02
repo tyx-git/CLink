@@ -81,7 +81,8 @@ private:
     void stop_modules();
     void setup_config_watcher(); 
     void start_config_watcher_timer();
-    void setup_ipc_handlers();   
+    void setup_ipc_handlers();
+    void on_session_event(network::SessionEvent event, const std::string& session_id);
 
     asio::io_context io_context_;
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> io_work_;
@@ -107,7 +108,11 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> shutdown_called_{false};
     std::atomic<SessionState> session_state_{SessionState::Disconnected};
+    std::atomic<int> active_session_count_{0};
     std::string session_id_{"none"};
+    std::string last_connect_phase_{"idle"};
+    std::string last_connect_reason_{"none"};
+    std::string last_connect_message_{};
 
     // Watcher related
     std::atomic<bool> auto_reload_{false};

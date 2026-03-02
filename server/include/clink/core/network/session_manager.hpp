@@ -5,6 +5,7 @@
 #include <vector>
 #include <shared_mutex>
 #include <unordered_map>
+#include <functional>
 
 #include "server/include/clink/core/network/transport_adapter.hpp"
 #include "server/include/clink/core/network/transport_listener.hpp"
@@ -21,6 +22,11 @@ enum class SessionStatus {
     Active,
     Closing,
     Error
+};
+
+enum class SessionEvent {
+    Connected,
+    Disconnected
 };
 
 /**
@@ -57,6 +63,8 @@ struct SessionContext {
  */
 class SessionManager : public std::enable_shared_from_this<SessionManager> {
 public:
+    using SessionEventCallback = std::function<void(SessionEvent, const std::string&)>;
+
     virtual ~SessionManager() = default;
 
     /**
@@ -118,6 +126,11 @@ public:
      * @brief 设置全局默认带宽限制
      */
     virtual void set_default_rate_limit(size_t bytes_per_second, size_t burst_size) = 0;
+
+    /**
+     * @brief 设置会话状态事件回调
+     */
+    virtual void set_session_event_callback(SessionEventCallback cb) = 0;
 };
 
 using SessionManagerPtr = std::shared_ptr<SessionManager>;

@@ -52,6 +52,8 @@ public:
     uint32_t get_last_received_seq() const { return last_received_seq_; }
     void set_last_received_seq(uint32_t seq);
 
+    // Compatibility helper for tests/legacy call sites.
+    void start();
     void start_async(std::function<void(std::error_code)> on_started = {});
     void stop();
 
@@ -139,6 +141,7 @@ private:
     Stats stats_;
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> shutting_down_{false};
     std::unique_ptr<asio::steady_timer> timer_;
     std::once_flag timer_once_;
 

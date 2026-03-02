@@ -75,7 +75,11 @@ void Application::initialize() {
         if (!ipc_server_ && options_.role == "service") {
             logger_->info("[init] stage=ipc_server.start_default.begin");
             ipc_server_ = ipc::create_server(logger_);
+#ifdef _WIN32
             ipc_server_->start("\\\\.\\pipe\\clink-ipc");
+#else
+            ipc_server_->start("/tmp/clink-ipc.sock");
+#endif
             logger_->info("[init] stage=ipc_server.start_default.ok");
         }
 
@@ -140,6 +144,11 @@ void Application::apply_configuration() {
 
             if (auto* impl = dynamic_cast<network::DefaultSessionManager*>(session_manager_.get())) {
                 impl->set_virtual_interface_enabled(vif_enabled);
+                impl->set_session_event_callback([this](network::SessionEvent event, const std::string& session_id) {
+                    asio::post(io_context_, [this, event, session_id]() {
+                        on_session_event(event, session_id);
+                    });
+                });
                 logger_->info(std::string("[apply] stage=session_manager.vif.preinit=") + (vif_enabled ? "true" : "false"));
             }
 
@@ -578,8 +587,9 @@ ipc::IpcClient& Application::ipc_client() {
 }
 
 std::string Application::get_session_status() const {
+    const auto state = session_state_.load();
     std::string state_str;
-    switch (session_state_.load()) {
+    switch (state) {
         case SessionState::Disconnected:  state_str = "disconnected"; break;
         case SessionState::Connecting:    state_str = "connecting"; break;
         case SessionState::Connected:     state_str = "connected"; break;
@@ -589,9 +599,21 @@ std::string Application::get_session_status() const {
     std::string result = "{";
     result += "\"status\": \"" + state_str + "\", ";
     result += "\"session_id\": \"" + session_id_ + "\", ";
-    
+    result += "\"connect_phase\": \"" + last_connect_phase_ + "\", ";
+    result += "\"connect_reason\": \"" + last_connect_reason_ + "\"";
+    if (!last_connect_message_.empty()) {
+        result += ", \"connect_message\": \"" + last_connect_message_ + "\"";
+    }
+    result += ", ";
+
     if (session_manager_) {
         auto sessions = session_manager_->get_active_sessions();
+        if (logger_) {
+            logger_->info("[status.stage] app_state=" + std::to_string(static_cast<int>(state)) +
+                          " app_state_text=" + state_str +
+                          " active_sessions=" + std::to_string(sessions.size()) +
+                          " session_id='" + session_id_ + "'");
+        }
         result += "\"active_sessions\": " + std::to_string(sessions.size());
         
         if (!sessions.empty()) {
@@ -630,9 +652,49 @@ std::string Application::get_session_status() const {
     return result;
 }
 
+void Application::on_session_event(network::SessionEvent event, const std::string& event_session_id) {
+    switch (event) {
+        case network::SessionEvent::Connected: {
+            const int prev_count = active_session_count_.fetch_add(1);
+            if (prev_count == 0) {
+                const auto prev_state = session_state_.load();
+                session_state_ = SessionState::Connected;
+                session_id_ = event_session_id;
+                logger_->info("[connect.state] transition " + std::to_string(static_cast<int>(prev_state)) + "->" +
+                              std::to_string(static_cast<int>(SessionState::Connected)) +
+                              " reason=engine_start_ok session_id=" + event_session_id);
+            } else {
+                logger_->info("[connect.state] connected_event additional_session session_id=" + event_session_id +
+                              " active_count=" + std::to_string(prev_count + 1));
+            }
+            break;
+        }
+        case network::SessionEvent::Disconnected: {
+            int current = active_session_count_.load();
+            while (current > 0 && !active_session_count_.compare_exchange_weak(current, current - 1)) {
+            }
+            const int new_count = active_session_count_.load();
+            logger_->info("[connect.state] disconnected_event session_id=" + event_session_id +
+                          " active_count=" + std::to_string(new_count));
+            if (new_count == 0) {
+                const auto prev_state = session_state_.load();
+                session_state_ = SessionState::Disconnected;
+                session_id_ = "none";
+                logger_->info("[connect.state] transition " + std::to_string(static_cast<int>(prev_state)) + "->" +
+                              std::to_string(static_cast<int>(SessionState::Disconnected)) +
+                              " reason=session_closed");
+            }
+            break;
+        }
+    }
+}
+
 std::string Application::connect_session(const std::string& endpoint_override) {
     using json = nlohmann::json;
     logger_->info("[connect.stage] enter payload_bytes=" + std::to_string(endpoint_override.size()));
+    if (!endpoint_override.empty()) {
+        logger_->info("[connect.stage] payload.raw=" + endpoint_override);
+    }
 
     auto parse_override = [](const std::string& raw) {
         struct Override {
@@ -669,8 +731,12 @@ std::string Application::connect_session(const std::string& endpoint_override) {
     auto tracer = observability::Telemetry::get_tracer("clink-app");
     observability::ScopedSpan span(tracer->start_span("connect_session"));
 
-    auto make_result = [](bool accepted, std::string status, std::string reason,
-                          std::string message = "", std::string endpoint = "", std::string session_id = "") {
+    auto make_result = [this](bool accepted, std::string status, std::string reason,
+                               std::string message = "", std::string endpoint = "", std::string session_id = "") {
+        last_connect_phase_ = status;
+        last_connect_reason_ = reason;
+        last_connect_message_ = message;
+
         json data;
         data["accepted"] = accepted;
         data["status"] = std::move(status);
@@ -698,7 +764,9 @@ std::string Application::connect_session(const std::string& endpoint_override) {
     logger_->info("[connect.stage] parse_override.begin");
     const auto ov = parse_override(endpoint_override);
     logger_->info("[connect.stage] parse_override.ok endpoint_present=" + std::string(ov.endpoint.empty() ? "false" : "true") +
-                  " transport_override=" + (ov.transport.empty() ? std::string("none") : ov.transport));
+                  " transport_override=" + (ov.transport.empty() ? std::string("none") : ov.transport) +
+                  " timeout_ms=" + std::to_string(ov.timeout_ms) +
+                  " no_self_check=" + std::string(ov.no_self_check ? "true" : "false"));
 
     std::string endpoint = ov.endpoint;
     if (endpoint.empty()) {
@@ -735,15 +803,24 @@ std::string Application::connect_session(const std::string& endpoint_override) {
     std::string target_port = (target_colon == std::string::npos) ? "" : target_hostport.substr(target_colon + 1);
 
     if (options_.role == "service") {
+
+        std::string listen_ep = configuration_.get_string("network.listen_endpoint", "");
+        auto [listen_transport, listen_hostport] = normalize_endpoint(listen_ep);
+
         bool allow_self_connect_debug = configuration_.get_bool("network.allow_self_connect_for_debug", false);
+        const bool allow_self_connect = configuration_.get_bool("network.allow_self_connect", false);
         if (const char* env_allow = std::getenv("CLINK_ALLOW_SELF_CONNECT_DEBUG")) {
             if (std::string(env_allow) == "1") {
                 allow_self_connect_debug = true;
             }
         }
 
-        std::string listen_ep = configuration_.get_string("network.listen_endpoint", "");
-        auto [listen_transport, listen_hostport] = normalize_endpoint(listen_ep);
+        if (const char* env_force_off = std::getenv("CLINK_FORCE_DISABLE_SELF_CONNECT_DEBUG")) {
+            if (std::string(env_force_off) == "1") {
+                allow_self_connect_debug = false;
+                logger_->warn("[connect.stage] self-connect debug forcibly disabled by CLINK_FORCE_DISABLE_SELF_CONNECT_DEBUG=1");
+            }
+        }
         logger_->info("[connect.stage] normalized_listener transport=" + listen_transport + " hostport=" + listen_hostport);
         auto listen_colon = listen_hostport.rfind(':');
         std::string listen_host = (listen_colon == std::string::npos) ? "" : listen_hostport.substr(0, listen_colon);
@@ -776,25 +853,32 @@ std::string Application::connect_session(const std::string& endpoint_override) {
                                   target_transport == listen_transport &&
                                   is_local_host(target_host) && is_local_host(listen_host);
 
-        if (ov.no_self_check) {
-            allow_self_connect_debug = true;
+        bool allow_self_connect_effective = allow_self_connect;
+        if (allow_self_connect_debug || ov.no_self_check) {
+            allow_self_connect_effective = true;
         }
 
-        if (self_connect && !allow_self_connect_debug) {
-            logger_->error("[app] connect aborted: endpoint resolves to local listener (self-connect loop risk): " + endpoint);
+        if (self_connect && !allow_self_connect_effective) {
+            logger_->error("[app] connect aborted: endpoint resolves to local listener (self-connect disabled by default): " + endpoint);
             span->set_attribute("error", "self_connect_blocked");
             logger_->info("connect.final status=rejected reason=self_connect_blocked endpoint=" + endpoint);
-            return make_result(false, "rejected", "self_connect_blocked", "endpoint resolves to local listener", endpoint);
+            return make_result(false, "rejected", "self_connect_blocked", "Connecting to local listener is disabled by default", endpoint);
         }
 
-        if (self_connect && allow_self_connect_debug) {
-            logger_->warn("[app] self-connect debug override enabled, proceeding: " + endpoint);
+        if (self_connect && allow_self_connect_effective) {
+            logger_->warn("[app] self-connect override enabled, proceeding: " + endpoint);
         }
     }
 
     span->set_attribute("endpoint", endpoint);
 
-    session_state_ = SessionState::Connecting;
+    {
+        const auto prev = session_state_.load();
+        session_state_ = SessionState::Connecting;
+        logger_->info("[connect.state] transition " + std::to_string(static_cast<int>(prev)) + "->" +
+                      std::to_string(static_cast<int>(SessionState::Connecting)) +
+                      " reason=transport_start.begin endpoint=" + endpoint);
+    }
     logger_->info("[connect.stage] state=connecting endpoint=" + endpoint);
     logger_->info("Starting session connection to " + endpoint);
 
@@ -837,6 +921,15 @@ std::string Application::connect_session(const std::string& endpoint_override) {
         logger_->info("[connect.stage] session.create.begin endpoint=" + endpoint);
         session_manager_->create_session(adapter);
         logger_->info("[connect.stage] session.create.ok endpoint=" + endpoint);
+    if (session_manager_) {
+        const auto sessions_after_create = session_manager_->get_active_sessions();
+        logger_->info("[connect.stage] session.create.snapshot active_sessions=" + std::to_string(sessions_after_create.size()));
+        for (const auto& s : sessions_after_create) {
+            logger_->info("[connect.stage] session.create.snapshot.item id=" + s.session_id +
+                          " status=" + std::to_string(static_cast<int>(s.status)) +
+                          " remote='" + s.remote_endpoint + "'");
+        }
+    }
     } catch (const std::exception& ex) {
         logger_->error(std::string("[app] create_session failed: ") + ex.what());
         span->set_attribute("error", ex.what());
@@ -853,12 +946,12 @@ std::string Application::connect_session(const std::string& endpoint_override) {
 
     session_id_ = "sess_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 10000);
     span->set_attribute("session_id", session_id_);
-    session_state_ = SessionState::Connected;
-    logger_->info("[connect.stage] state=connected session_id=" + session_id_);
-    logger_->info("Session connected: " + session_id_);
-    logger_->info("connect.final status=connected session_id=" + session_id_ + " endpoint=" + endpoint);
-    span->add_event("session_active");
-    return make_result(true, "connected", "none", "", endpoint, session_id_);
+    session_state_ = SessionState::Connecting;
+    logger_->info("[connect.stage] state=pending session_id=" + session_id_);
+    logger_->info("Session accepted (pending): " + session_id_);
+    logger_->info("connect.final status=pending session_id=" + session_id_ + " endpoint=" + endpoint);
+    span->add_event("session_pending");
+    return make_result(true, "pending", "none", "engine starting asynchronously", endpoint, session_id_);
 }
 
 void Application::disconnect_session() {
@@ -867,16 +960,36 @@ void Application::disconnect_session() {
         return;
     }
 
+    const auto prev_state = session_state_.load();
     session_state_ = SessionState::Disconnecting;
+    logger_->info("[connect.state] transition " + std::to_string(static_cast<int>(prev_state)) + "->" +
+                  std::to_string(static_cast<int>(SessionState::Disconnecting)) +
+                  " reason=disconnect_command.begin");
     logger_->info("Starting session disconnection process...");
 
-    // Simulate asynchronous disconnection
-    std::thread([this]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        session_id_ = "none";
-        session_state_ = SessionState::Disconnected;
-        logger_->info("Session disconnected");
-    }).detach();
+    std::vector<std::string> ids;
+    if (session_manager_) {
+        auto sessions = session_manager_->get_active_sessions();
+        ids.reserve(sessions.size());
+        for (const auto& s : sessions) {
+            ids.push_back(s.session_id);
+        }
+    }
+
+    if (session_manager_) {
+        for (const auto& id : ids) {
+            session_manager_->terminate_session(id);
+        }
+    }
+
+    active_session_count_.store(0);
+    session_id_ = "none";
+    const auto prev = session_state_.load();
+    session_state_ = SessionState::Disconnected;
+    logger_->info("[connect.state] transition " + std::to_string(static_cast<int>(prev)) + "->" +
+                  std::to_string(static_cast<int>(SessionState::Disconnected)) +
+                  " reason=disconnect_command");
+    logger_->info("Session disconnected");
 }
 
 }  // namespace clink::core
