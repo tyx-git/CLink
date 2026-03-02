@@ -661,7 +661,7 @@ std::error_code WindowsVirtualInterface::open_tap_adapter(const AdapterCandidate
         DWORD err = GetLastError();
         std::cerr << "[virtual_interface] failed to open TAP adapter " << candidate.identifier
                   << ": " << err << std::endl;
-        return std::error_code(err, std::system_category());
+        return std::error_code(static_cast<int>(err), std::system_category());
     }
 
     DWORD len = 0;
@@ -669,8 +669,7 @@ std::error_code WindowsVirtualInterface::open_tap_adapter(const AdapterCandidate
                          mac_address_, sizeof(mac_address_), &len, NULL)) {
         DWORD err = GetLastError();
         CloseHandle(handle);
-        return std::error_code(err, std::system_category());
-    }
+        return std::error_code(static_cast<int>(err), std::system_category());    }
 
     std::memcpy(virtual_gateway_mac_, mac_address_, 6);
     virtual_gateway_mac_[0] ^= 0x02;
@@ -722,14 +721,14 @@ std::error_code WindowsVirtualInterface::open_wintun_adapter(const AdapterCandid
     }
     if (!adapter) {
         DWORD err = GetLastError();
-        return std::error_code(err ? err : ERROR_FILE_NOT_FOUND, std::system_category());
+        return std::error_code(static_cast<int>(err ? err : ERROR_FILE_NOT_FOUND), std::system_category());
     }
 
     WINTUN_SESSION* session = api.WintunStartSession(adapter, kDefaultRingCapacity);
     if (!session) {
         DWORD err = GetLastError();
         api.WintunCloseAdapter(adapter);
-        return std::error_code(err ? err : ERROR_NOT_ENOUGH_MEMORY, std::system_category());
+        return std::error_code(static_cast<int>(err ? err : ERROR_NOT_ENOUGH_MEMORY), std::system_category());
     }
 
     HANDLE evt = api.WintunGetReadWaitEvent(session);
@@ -800,9 +799,9 @@ public:
     explicit LinuxVirtualInterface(asio::io_context& io_context)
         : io_context_(io_context), stream_descriptor_(io_context) {}
 
-    std::error_code open(const std::string& name, 
-                         const std::string& address, 
-                         const std::string& netmask) override {
+    std::error_code open(const std::string& name,
+                         [[maybe_unused]] const std::string& address,
+                         [[maybe_unused]] const std::string& netmask) override {
         name_ = name;
         
         // 打开 TUN 设备
@@ -818,7 +817,7 @@ public:
             std::strncpy(ifr.ifr_name, name.c_str(), IFNAMSIZ);
         }
 
-        if (::ioctl(fd, TUNSETIFF, (void*)&ifr) < 0) {
+        if (::ioctl(fd, TUNSETIFF, static_cast<void*>(&ifr)) < 0) {
             ::close(fd);
             return std::error_code(errno, std::system_category());
         }

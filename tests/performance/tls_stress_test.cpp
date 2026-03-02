@@ -64,7 +64,7 @@ int main(int argc, char* argv[]) {
         auto tls_conn = std::dynamic_pointer_cast<network::TlsTransportAdapter>(conn);
         if (tls_conn) {
             tls_conn->start_accepted();
-            tls_conn->on_receive([&](const uint8_t* data, size_t size) {
+            tls_conn->on_receive([&](const uint8_t* /*data*/, size_t size) {
                 total_bytes_received += size;
                 total_packets_received++;
             });
@@ -141,7 +141,7 @@ int main(int argc, char* argv[]) {
 
     running = false;
     auto end_time = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+    const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
     // Join traffic threads
     for (auto& t : traffic_threads) {
@@ -159,9 +159,12 @@ int main(int argc, char* argv[]) {
     }
 
     // 5. Report
-    double total_mb = static_cast<double>(total_bytes_received) / (1024 * 1024);
-    double time_s = duration / 1000.0;
-    double throughput = total_mb / time_s;
+    const double total_mb = static_cast<double>(total_bytes_received.load()) / (1024.0 * 1024.0);
+    const double time_s = static_cast<double>(duration_ms) / 1000.0;
+    const double throughput = (time_s > 0.0) ? (total_mb / time_s) : 0.0;
+    const double packets_per_second = (time_s > 0.0)
+        ? (static_cast<double>(total_packets_received.load()) / time_s)
+        : 0.0;
 
     std::cout << "------------------------------------------------" << std::endl;
     std::cout << "Performance Test Results" << std::endl;
@@ -170,7 +173,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Duration:    " << time_s << " s" << std::endl;
     std::cout << "Total Data:  " << total_mb << " MB" << std::endl;
     std::cout << "Throughput:  " << throughput << " MB/s" << std::endl;
-    std::cout << "Packets/sec: " << (total_packets_received / time_s) << std::endl;
+    std::cout << "Packets/sec: " << packets_per_second << std::endl;
     std::cout << "------------------------------------------------" << std::endl;
 
     // Write report to file
@@ -183,7 +186,7 @@ int main(int argc, char* argv[]) {
     report << "- **Duration**: " << time_s << " s\n";
     report << "- **Total Data Transfer**: " << total_mb << " MB\n";
     report << "- **Average Throughput**: " << throughput << " MB/s\n";
-    report << "- **Packets Per Second**: " << (total_packets_received / time_s) << "\n";
+    report << "- **Packets Per Second**: " << packets_per_second << "\n";
     report.close();
 
     return 0;

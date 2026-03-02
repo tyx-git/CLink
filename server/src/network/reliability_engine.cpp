@@ -1,6 +1,7 @@
 #include "server/include/clink/core/network/reliability_engine.hpp"
 #include "server/include/clink/core/network/packet.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <sstream>
 #include <thread>
 
@@ -44,8 +45,17 @@ void ReliabilityEngine::report_corrupted_packet() {
 }
 
 void ReliabilityEngine::ensure_timer() {
+    if (shutting_down_.load()) {
+        if (logger_) logger_->warn("[reliability] ensure_timer called during shutdown, ignoring");
+        return;
+    }
+
     if (logger_) logger_->info("[reliability] timer.ensure.enter tid=" + tid_str());
     std::call_once(timer_once_, [this]() {
+        if (shutting_down_.load()) {
+            if (logger_) logger_->warn("[reliability] timer.ensure.once skipped due to shutdown");
+            return;
+        }
         if (logger_) logger_->info("[reliability] timer.ensure.once.begin tid=" + tid_str());
         timer_ = std::make_unique<asio::steady_timer>(io_context_);
         if (logger_) logger_->info("[reliability] timer.ensure.once.ok tid=" + tid_str());
@@ -53,11 +63,33 @@ void ReliabilityEngine::ensure_timer() {
     if (logger_) logger_->info("[reliability] timer.ensure.exit tid=" + tid_str());
 }
 
+void ReliabilityEngine::start() {
+    std::atomic<bool> done{false};
+    std::error_code start_ec;
+
+    start_async([&](std::error_code ec) {
+        start_ec = ec;
+        done.store(true, std::memory_order_release);
+    });
+
+    while (!done.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    (void)start_ec;
+}
+
 void ReliabilityEngine::start_async(std::function<void(std::error_code)> on_started) {
     if (logger_) logger_->info("[reliability] start_async.post tid=" + tid_str());
 
     auto self = shared_from_this();
     asio::post(io_context_, [self, cb = std::move(on_started)]() mutable {
+        if (self->shutting_down_.load()) {
+            if (self->logger_) self->logger_->warn("[reliability] start_async ignored during shutdown");
+            if (cb) cb(std::make_error_code(std::errc::operation_canceled));
+            return;
+        }
+
         if (self->logger_) self->logger_->info("[reliability] start.begin tid=" + tid_str());
 
         if (self->running_) {
@@ -67,12 +99,28 @@ void ReliabilityEngine::start_async(std::function<void(std::error_code)> on_star
         }
 
         try {
-            self->ensure_timer();
             self->running_ = true;
-            if (self->logger_) self->logger_->info("[reliability.stage] start.timer.begin tid=" + tid_str());
-            self->start_timer();
+
+            bool enable_timer = false;
+            if (const char* env = std::getenv("CLINK_ENABLE_RELIABILITY_TIMER")) {
+                if (std::string(env) == "1") {
+                    enable_timer = true;
+                }
+            }
+
+            if (enable_timer) {
+                self->ensure_timer();
+                if (self->logger_) self->logger_->info("[reliability.stage] start.timer.begin tid=" + tid_str());
+                self->start_timer();
+            } else if (self->logger_) {
+                self->logger_->warn("[reliability.stage] timer.disabled_for_stability");
+            }
+
             if (self->logger_) self->logger_->info("[reliability] start.ok tid=" + tid_str());
             if (cb) cb({});
+        } catch (const std::exception& ex) {
+            if (self->logger_) self->logger_->error(std::string("[reliability] start.exception: ") + ex.what());
+            if (cb) cb(std::make_error_code(std::errc::operation_canceled));
         } catch (...) {
             if (self->logger_) self->logger_->error("[reliability] start.exception tid=" + tid_str());
             if (cb) cb(std::make_error_code(std::errc::operation_canceled));
@@ -81,14 +129,28 @@ void ReliabilityEngine::start_async(std::function<void(std::error_code)> on_star
 }
 
 void ReliabilityEngine::stop() {
+    if (shutting_down_.exchange(true)) {
+        return;
+    }
+
     running_ = false;
-    ensure_timer();
     if (timer_) {
-        timer_->cancel();
+        try {
+            timer_->cancel();
+        } catch (const std::exception& ex) {
+            if (logger_) {
+                logger_->warn(std::string("[reliability] timer cancel exception during stop: ") + ex.what());
+            }
+        }
     }
 }
 
 void ReliabilityEngine::start_timer() {
+    if (shutting_down_.load()) {
+        if (logger_) logger_->warn("[reliability.stage] timer.skip_shutting_down tid=" + tid_str());
+        return;
+    }
+
     ensure_timer();
     if (!running_) {
         if (logger_) logger_->info("[reliability.stage] timer.skip_not_running tid=" + tid_str());
@@ -167,6 +229,10 @@ void ReliabilityEngine::start_timer() {
 }
 
 void ReliabilityEngine::set_rate_limit(size_t bytes_per_second, size_t burst_size) {
+    if (shutting_down_.load()) {
+        if (logger_) logger_->warn("[reliability] set_rate_limit ignored during shutdown");
+        return;
+    }
     if (rate_limiter_) {
         rate_limiter_->update_limits(bytes_per_second, burst_size);
     }

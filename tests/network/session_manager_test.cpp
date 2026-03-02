@@ -10,7 +10,9 @@ using namespace clink::core::network;
 class MockVirtualInterface : public VirtualInterface {
 public:
     using VirtualInterface::write_packet;
-    std::error_code open(const std::string& name, const std::string& address, const std::string& netmask) override {
+    std::error_code open([[maybe_unused]] const std::string& name,
+                         [[maybe_unused]] const std::string& address,
+                         [[maybe_unused]] const std::string& netmask) override {
         return {};
     }
     void close() override {}
@@ -41,7 +43,7 @@ public:
 class MockTransportAdapter : public TransportAdapter {
 public:
     std::string_view type() const noexcept override { return "mock"; }
-    std::error_code start(const std::string& endpoint) override { return {}; }
+    std::error_code start([[maybe_unused]] const std::string& endpoint) override { return {}; }
     void stop() override { running_ = false; }
     std::error_code send(const uint8_t* data, size_t size) override {
         sent_data_.emplace_back(data, data + size);

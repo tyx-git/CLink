@@ -16,7 +16,12 @@
 using namespace clink::core::utils;
 using json = nlohmann::json;
 namespace {
+#ifdef _WIN32
 constexpr const char* kIpcPipe = "\\\\.\\pipe\\clink-ipc";
+#else
+constexpr const char* kIpcPipe = "/tmp/clink-ipc.sock";
+#endif
+
 struct IpcEnvelope {
     bool ok{false};
     std::string command;
@@ -283,7 +288,8 @@ int handle_diag(clink::core::Application& app, const clink::core::ApplicationOpt
     const int res = std::system("ping -n 1 8.8.8.8 > nul");
     Terminal::println(res == 0 ? "OK" : "FAILED", res == 0 ? Color::Green : Color::Red);
 #else
-    Terminal::println("SKIPPED (non-windows)", Color::Yellow);
+    const int res = std::system("ping -c 1 8.8.8.8 > /dev/null 2>&1");
+    Terminal::println(res == 0 ? "OK" : "FAILED", res == 0 ? Color::Green : Color::Red);
 #endif
     Terminal::print("[4/4] Checking log files... ", Color::White);
     std::filesystem::path log_path = "logs/clink-daemon.log";
@@ -510,6 +516,9 @@ int main(int argc, char** argv) {
                     Terminal::println(status, accepted ? Color::Green : Color::Yellow);
                     if (!reason.empty()) Terminal::println("  reason: " + reason, Color::Yellow);
                     if (!message.empty()) Terminal::println("  message: " + message, Color::Yellow);
+                    if (reason == "self_connect_blocked") {
+                        Terminal::println("  hint: target resolves to local listener. Use another host/IP or enable network.allow_self_connect=true for debug.", Color::Yellow);
+                    }
                     Terminal::print("Response: ", Color::BrightWhite);
                     Terminal::println(envelope.raw, accepted ? Color::Green : Color::Yellow);
                     return accepted;

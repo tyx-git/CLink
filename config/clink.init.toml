@@ -5,6 +5,8 @@ data_dir = "${CLINK_DATA_DIR}"  # override via environment
 [network]
 # note: runtime reads network.listen_endpoint
 listen_endpoint = "tcp://0.0.0.0:4433"
+allow_self_connect_for_debug = false
+allow_self_connect = false
 bandwidth_limit = 10240  # 10 KB/s for testing rate limiting
 
 [security]

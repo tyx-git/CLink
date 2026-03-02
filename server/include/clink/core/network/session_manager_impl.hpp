@@ -49,6 +49,7 @@ public:
 
     void set_acl(std::shared_ptr<AccessControlList> acl) { acl_ = std::move(acl); }
     void set_policy_engine(std::shared_ptr<policy::PolicyEngine> engine) { policy_engine_ = std::move(engine); }
+    void set_session_event_callback(SessionEventCallback cb) override { session_event_cb_ = std::move(cb); }
 
 protected:
     virtual VirtualInterfacePtr create_interface();
@@ -66,6 +67,7 @@ private:
     std::vector<TransportListenerPtr> listeners_;
     std::shared_ptr<AccessControlList> acl_;
     std::shared_ptr<policy::PolicyEngine> policy_engine_;
+    SessionEventCallback session_event_cb_;
     
     size_t default_bytes_per_second_{0};
     size_t default_burst_size_{0};

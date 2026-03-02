@@ -281,10 +281,10 @@ void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
         engine->set_rate_limit(default_bytes_per_second_, default_burst_size_);
     }
 
-    if (logger_) logger_->info("[session.stage] lock.acquire.begin");
+    if (logger_) logger_->info("[session.lock] acquire.begin scope=new_connection");
     {
         std::unique_lock lock(sessions_mutex_);
-        if (logger_) logger_->info("[session.stage] lock.acquire.ok");
+        if (logger_) logger_->info("[session.lock] acquire.ok scope=new_connection");
 
         SessionContext ctx;
         ctx.session_id = session_id;
@@ -374,11 +374,42 @@ void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
 
     auto started_flag = std::make_shared<std::atomic<bool>>(false);
     auto watchdog = std::make_shared<asio::steady_timer>(io_context_);
-    watchdog->expires_after(std::chrono::milliseconds(200));
+    watchdog->expires_after(std::chrono::seconds(5));
     watchdog->async_wait([this, session_id, started_flag](const std::error_code& ec) {
         if (ec) return;
         if (!started_flag->load()) {
-            if (logger_) logger_->error("[session.stage] engine.start.watchdog.timeout session_id=" + session_id);
+            if (logger_) logger_->error("[session.stage] engine.start.watchdog.timeout session_id=" + session_id + " timeout_ms=5000");
+
+            SessionEventCallback cb;
+            std::shared_ptr<ReliabilityEngine> engine_to_stop;
+            {
+                if (logger_) logger_->info("[session.lock] acquire.begin scope=engine_start_timeout");
+                std::unique_lock lock(sessions_mutex_);
+                if (logger_) logger_->info("[session.lock] acquire.ok scope=engine_start_timeout");
+
+                auto sit = sessions_.find(session_id);
+                if (sit != sessions_.end()) {
+                    sit->second.status = SessionStatus::Error;
+                }
+
+                auto eit = engines_.find(session_id);
+                if (eit != engines_.end()) {
+                    engine_to_stop = eit->second;
+                    engines_.erase(eit);
+                }
+
+                sessions_.erase(session_id);
+                adapters_.erase(session_id);
+                cb = session_event_cb_;
+            }
+
+            if (engine_to_stop) {
+                engine_to_stop->stop();
+            }
+
+            if (cb) {
+                cb(SessionEvent::Disconnected, session_id);
+            }
         }
     });
 
@@ -387,9 +418,40 @@ void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
         watchdog->cancel();
         if (ec) {
             if (logger_) logger_->error("[session.stage] engine.start_async.failed session_id=" + session_id + " ec=" + ec.message());
+            if (logger_) logger_->info("[session.lock] acquire.begin scope=engine_start_failed");
+            std::unique_lock lock(sessions_mutex_);
+            if (logger_) logger_->info("[session.lock] acquire.ok scope=engine_start_failed");
+            auto it = sessions_.find(session_id);
+            if (it != sessions_.end()) {
+                const auto prev = it->second.status;
+                it->second.status = SessionStatus::Error;
+                if (logger_) logger_->error("[session.state] transition session_id=" + session_id +
+                                            " " + std::to_string(static_cast<int>(prev)) + "->" +
+                                            std::to_string(static_cast<int>(SessionStatus::Error)) +
+                                            " reason=engine_start_failed");
+            }
             return;
         }
         if (logger_) logger_->info("[session.stage] engine.start_async.ok session_id=" + session_id);
+        bool fire_connected = false;
+        {
+            if (logger_) logger_->info("[session.lock] acquire.begin scope=engine_start_ok");
+            std::unique_lock lock(sessions_mutex_);
+            if (logger_) logger_->info("[session.lock] acquire.ok scope=engine_start_ok");
+            auto it = sessions_.find(session_id);
+            if (it != sessions_.end()) {
+                const auto prev = it->second.status;
+                it->second.status = SessionStatus::Active;
+                if (logger_) logger_->info("[session.state] transition session_id=" + session_id +
+                                           " " + std::to_string(static_cast<int>(prev)) + "->" +
+                                           std::to_string(static_cast<int>(SessionStatus::Active)) +
+                                           " reason=engine_start_ok");
+                fire_connected = true;
+            }
+        }
+        if (fire_connected && session_event_cb_) {
+            session_event_cb_(SessionEvent::Connected, session_id);
+        }
     });
 
     if (logger_) logger_->info("[session] new connection handled, id: " + session_id);
@@ -445,17 +507,30 @@ void DefaultSessionManager::add_listener(TransportListenerPtr listener) {
 }
 
 void DefaultSessionManager::terminate_session(const std::string& session_id) {
-    std::unique_lock lock(sessions_mutex_);
-    
-    auto it = engines_.find(session_id);
-    if (it != engines_.end()) {
-        it->second->stop();
-        engines_.erase(it);
+    std::shared_ptr<ReliabilityEngine> engine_to_stop;
+    SessionEventCallback cb;
+    {
+        std::unique_lock lock(sessions_mutex_);
+
+        auto it = engines_.find(session_id);
+        if (it != engines_.end()) {
+            engine_to_stop = it->second;
+            engines_.erase(it);
+        }
+
+        sessions_.erase(session_id);
+        adapters_.erase(session_id);
+        cb = session_event_cb_;
     }
 
-    sessions_.erase(session_id);
-    adapters_.erase(session_id);
-    
+    if (engine_to_stop) {
+        engine_to_stop->stop();
+    }
+
+    if (cb) {
+        cb(SessionEvent::Disconnected, session_id);
+    }
+
     if (logger_) {
         logger_->info("[session] session terminated: " + session_id);
     }
@@ -501,9 +576,22 @@ std::error_code DefaultSessionManager::route_packet(const uint8_t* data, size_t 
 }
 
 void DefaultSessionManager::broadcast(const uint8_t* data, size_t size) {
-    std::shared_lock lock(sessions_mutex_);
-    for (auto& [id, adapter] : adapters_) {
-        adapter->send(data, size);
+    std::vector<TransportAdapterPtr> adapters_snapshot;
+    if (logger_) logger_->info("[session.lock] acquire.begin scope=broadcast");
+    {
+        std::shared_lock lock(sessions_mutex_);
+        if (logger_) logger_->info("[session.lock] acquire.ok scope=broadcast");
+        adapters_snapshot.reserve(adapters_.size());
+        for (auto& [id, adapter] : adapters_) {
+            (void)id;
+            adapters_snapshot.push_back(adapter);
+        }
+    }
+
+    for (const auto& adapter : adapters_snapshot) {
+        if (adapter) {
+            adapter->send(data, size);
+        }
     }
 }
 
@@ -513,29 +601,55 @@ void DefaultSessionManager::shutdown() {
     if (logger_) {
         logger_->info("[session] shutting down session manager");
     }
-    
+
     heartbeat_timer_.cancel();
 
-    std::unique_lock lock(sessions_mutex_);
-    for (auto& listener : listeners_) {
-        listener->stop();
-    }
-    listeners_.clear();
+    std::vector<TransportListenerPtr> listeners_snapshot;
+    std::vector<TransportAdapterPtr> adapters_snapshot;
+    std::vector<std::shared_ptr<ReliabilityEngine>> engines_snapshot;
+    VirtualInterfacePtr vif_snapshot;
 
-    for (auto& [id, adapter] : adapters_) {
-        adapter->stop();
-    }
-    
-    for (auto& [id, engine] : engines_) {
-        engine->stop();
-    }
-    
-    engines_.clear();
-    adapters_.clear();
-    sessions_.clear();
+    if (logger_) logger_->info("[session.lock] acquire.begin scope=shutdown");
+    {
+        std::unique_lock lock(sessions_mutex_);
+        if (logger_) logger_->info("[session.lock] acquire.ok scope=shutdown");
 
-    if (virtual_interface_) {
-        virtual_interface_->close();
+        listeners_snapshot = std::move(listeners_);
+        for (auto& [id, adapter] : adapters_) {
+            (void)id;
+            adapters_snapshot.push_back(adapter);
+        }
+        for (auto& [id, engine] : engines_) {
+            (void)id;
+            engines_snapshot.push_back(engine);
+        }
+
+        adapters_.clear();
+        engines_.clear();
+        sessions_.clear();
+        vif_snapshot = std::move(virtual_interface_);
+    }
+
+    for (auto& listener : listeners_snapshot) {
+        if (listener) {
+            listener->stop();
+        }
+    }
+
+    for (auto& adapter : adapters_snapshot) {
+        if (adapter) {
+            adapter->stop();
+        }
+    }
+
+    for (auto& engine : engines_snapshot) {
+        if (engine) {
+            engine->stop();
+        }
+    }
+
+    if (vif_snapshot) {
+        vif_snapshot->close();
     }
 }
 

@@ -1,19 +1,23 @@
 #pragma once
 
-#include <windows.h>
-#include <dpapi.h>
 #include <string>
 #include <vector>
 #include <stdexcept>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <dpapi.h>
+#endif
 
 namespace clink::core::security {
 
 class DpapiHelper {
 public:
     static std::string encrypt(const std::string& plain_text) {
+#ifdef _WIN32
         DATA_BLOB input;
         DATA_BLOB output;
-        
+
         input.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(plain_text.data()));
         input.cbData = static_cast<DWORD>(plain_text.size());
 
@@ -23,12 +27,18 @@ public:
             return encrypted;
         }
         throw std::runtime_error("DPAPI encryption failed");
+#else
+        // Linux/macOS compatibility fallback: no-op encryption for now.
+        // TODO: replace with platform keyring or libsodium-based encryption.
+        return plain_text;
+#endif
     }
 
     static std::string decrypt(const std::string& encrypted_data) {
+#ifdef _WIN32
         DATA_BLOB input;
         DATA_BLOB output;
-        
+
         input.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(encrypted_data.data()));
         input.cbData = static_cast<DWORD>(encrypted_data.size());
 
@@ -38,6 +48,9 @@ public:
             return decrypted;
         }
         throw std::runtime_error("DPAPI decryption failed");
+#else
+        return encrypted_data;
+#endif
     }
 
     // Base64 helpers for storing encrypted binary data in TOML
