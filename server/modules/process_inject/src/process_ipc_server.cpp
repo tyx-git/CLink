@@ -4,6 +4,9 @@
 #include <windows.h>
 #include <atomic>
 #include <sddl.h>
+#include <deque>
+#include <mutex>
+#include <cstring>
 
 namespace {
 struct PipeSecurityAttributes {
@@ -34,25 +37,60 @@ struct PipeSecurityAttributes {
 
 namespace clink::hook {
 
+namespace {
+void log_ipc(const ProcessIPCServer::LogSink& sink, bool is_error, const std::string& msg) {
+    if (sink) {
+        sink(is_error, msg);
+        return;
+    }
+    if (is_error) {
+        std::cerr << "[ipc.server][error] " << msg << std::endl;
+    } else {
+        std::cerr << "[ipc.server] " << msg << std::endl;
+    }
+}
+}
+
 // Forward declaration
 class NamedPipeAcceptor;
 
 class WindowsNamedPipeConnection : public IPCConnection, public std::enable_shared_from_this<WindowsNamedPipeConnection> {
 public:
-    WindowsNamedPipeConnection(asio::io_context& ioc, HANDLE pipe_handle)
-        : pipe_(ioc, pipe_handle) {}
+    static constexpr uint32_t kMaxPacketBody = 4 * 1024 * 1024; // 4MB upper bound for safety
+
+    WindowsNamedPipeConnection(asio::io_context& ioc, HANDLE pipe_handle, ProcessIPCServer::LogSink log_sink)
+        : pipe_(ioc, pipe_handle), log_sink_(std::move(log_sink)) {}
 
     void start(ProcessIPCServer::PacketHandler handler, ProcessIPCServer::DisconnectHandler disconnect_handler) {
+        log_ipc(log_sink_, false, "connection start");
         handler_ = handler;
-        disconnect_handler_ = disconnect_handler;
+        {
+            std::lock_guard<std::mutex> lock(handler_mutex_);
+            disconnect_handler_ = std::move(disconnect_handler);
+        }
         read_header();
     }
 
     void write_packet(ipc::PacketType type, uint64_t socket_id, const std::vector<char>& data) override {
-        auto self = shared_from_this();
-        
+        if (closed_.load(std::memory_order_acquire)) {
+            log_ipc(log_sink_, false,
+                    "write drop: closed type=" + std::to_string(static_cast<int>(type)) +
+                    " sid=" + std::to_string(socket_id));
+            return;
+        }
+
+        log_ipc(log_sink_, false,
+                "write enqueue type=" + std::to_string(static_cast<int>(type)) +
+                " sid=" + std::to_string(socket_id) +
+                " len=" + std::to_string(data.size()));
+
+        if (data.size() > static_cast<size_t>(kMaxPacketBody)) {
+            close();
+            return;
+        }
+
         auto packet = std::make_shared<std::vector<char>>();
-        size_t total_size = sizeof(ipc::PacketHeader) + data.size();
+        const size_t total_size = sizeof(ipc::PacketHeader) + data.size();
         packet->resize(total_size);
 
         ipc::PacketHeader* header = reinterpret_cast<ipc::PacketHeader*>(packet->data());
@@ -65,34 +103,88 @@ public:
             std::memcpy(packet->data() + sizeof(ipc::PacketHeader), data.data(), data.size());
         }
 
-        asio::async_write(pipe_, asio::buffer(*packet),
-            [self, packet](const std::error_code& ec, std::size_t) {
-                if (ec) {
-                    self->close();
-                }
-            });
+        bool should_start_write = false;
+        {
+            std::lock_guard<std::mutex> lock(write_mutex_);
+            should_start_write = write_queue_.empty();
+            write_queue_.push_back(packet);
+        }
+
+        if (should_start_write) {
+            do_write();
+        }
     }
 
     void close() override {
+        bool expected = false;
+        if (!closed_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        log_ipc(log_sink_, false, "connection close");
+
+        std::error_code ec;
         if (pipe_.is_open()) {
-            std::error_code ec;
+            pipe_.cancel(ec);
             pipe_.close(ec);
-            if (disconnect_handler_) {
-                // Use a local copy and clear the member first to avoid recursion loops if handler calls close
-                auto handler = disconnect_handler_;
-                disconnect_handler_ = nullptr;
-                handler(shared_from_this());
-            }
+        }
+
+        ProcessIPCServer::DisconnectHandler handler;
+        {
+            std::lock_guard<std::mutex> lock(handler_mutex_);
+            handler = std::move(disconnect_handler_);
+        }
+        if (handler) {
+            handler(shared_from_this());
         }
     }
 
 private:
+    void do_write() {
+        std::shared_ptr<std::vector<char>> packet;
+        {
+            std::lock_guard<std::mutex> lock(write_mutex_);
+            if (write_queue_.empty()) {
+                return;
+            }
+            packet = write_queue_.front();
+        }
+
+        auto self = shared_from_this();
+        asio::async_write(pipe_, asio::buffer(*packet),
+            [self, packet](const std::error_code& ec, std::size_t) {
+                if (ec) {
+                    self->close();
+                    return;
+                }
+
+                bool has_more = false;
+                {
+                    std::lock_guard<std::mutex> lock(self->write_mutex_);
+                    if (!self->write_queue_.empty()) {
+                        self->write_queue_.pop_front();
+                    }
+                    has_more = !self->write_queue_.empty();
+                }
+
+                if (has_more) {
+                    self->do_write();
+                }
+            });
+    }
+
     void read_header() {
         auto self = shared_from_this();
         asio::async_read(pipe_, asio::buffer(&header_buffer_, sizeof(ipc::PacketHeader)),
             [self](const std::error_code& ec, std::size_t) {
                 if (!ec) {
-                    if (self->header_buffer_.magic != ipc::IPC_MAGIC) {
+                    log_ipc(self->log_sink_, false,
+                            "read header type=" + std::to_string(static_cast<int>(self->header_buffer_.type)) +
+                            " sid=" + std::to_string(self->header_buffer_.socket_id) +
+                            " len=" + std::to_string(self->header_buffer_.length));
+                    if (self->header_buffer_.magic != ipc::IPC_MAGIC ||
+                        self->header_buffer_.length > kMaxPacketBody) {
+                        log_ipc(self->log_sink_, true, "invalid header/magic or body too large");
                         self->close();
                         return;
                     }
@@ -110,15 +202,19 @@ private:
             asio::async_read(pipe_, asio::buffer(body_buffer_),
                 [self](const std::error_code& ec, std::size_t) {
                     if (!ec) {
+                        log_ipc(self->log_sink_, false,
+                                "read body ok len=" + std::to_string(self->body_buffer_.size()));
                         if (self->handler_) {
                             self->handler_(self, self->header_buffer_, self->body_buffer_);
                         }
                         self->read_header();
                     } else {
+                        log_ipc(self->log_sink_, true, std::string("read body failed: ") + ec.message());
                         self->close();
                     }
                 });
         } else {
+            body_buffer_.clear();
             if (handler_) {
                 handler_(shared_from_this(), header_buffer_, body_buffer_);
             }
@@ -131,14 +227,19 @@ private:
     std::vector<char> body_buffer_;
     ProcessIPCServer::PacketHandler handler_;
     ProcessIPCServer::DisconnectHandler disconnect_handler_;
+    ProcessIPCServer::LogSink log_sink_;
+    std::mutex write_mutex_;
+    std::deque<std::shared_ptr<std::vector<char>>> write_queue_;
+    std::mutex handler_mutex_;
+    std::atomic<bool> closed_{false};
 };
 
 class NamedPipeAcceptor : public std::enable_shared_from_this<NamedPipeAcceptor> {
 public:
-    NamedPipeAcceptor(asio::io_context& ioc, std::weak_ptr<ProcessIPCServer> server)
-        : ioc_(ioc), server_(server), event_handle_(ioc) {
+    NamedPipeAcceptor(asio::io_context& ioc, std::weak_ptr<ProcessIPCServer> server, ProcessIPCServer::LogSink log_sink)
+        : ioc_(ioc), server_(server), event_handle_(ioc), log_sink_(std::move(log_sink)) {
         current_pipe_ = INVALID_HANDLE_VALUE;
-        memset(&overlapped_, 0, sizeof(overlapped_));
+        std::memset(&overlapped_, 0, sizeof(overlapped_));
     }
 
     ~NamedPipeAcceptor() {
@@ -152,25 +253,24 @@ public:
     }
 
     void stop() {
-        if (closed_) return;
-        closed_ = true;
-        
-        // Cancel any pending operations
+        if (closed_.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        std::error_code ec;
         if (event_handle_.is_open()) {
-            std::error_code ec;
             event_handle_.cancel(ec);
             event_handle_.close(ec);
         }
-        
-        if (overlapped_.hEvent) {
-            CloseHandle(overlapped_.hEvent);
-            overlapped_.hEvent = NULL;
-        }
 
         if (current_pipe_ != INVALID_HANDLE_VALUE) {
+            CancelIoEx(current_pipe_, &overlapped_);
+            DisconnectNamedPipe(current_pipe_);
             CloseHandle(current_pipe_);
             current_pipe_ = INVALID_HANDLE_VALUE;
         }
+
+        overlapped_.hEvent = NULL;
     }
 
 private:
@@ -192,7 +292,7 @@ private:
         );
 
         if (hPipe == INVALID_HANDLE_VALUE) {
-            std::cerr << "CreateNamedPipe failed: " << GetLastError() << std::endl;
+            log_ipc(log_sink_, true, "CreateNamedPipe failed err=" + std::to_string(GetLastError()));
             schedule_retry();
             return;
         }
@@ -205,7 +305,7 @@ private:
              // Actually we can reuse the event if we want, but let's recreate to be safe and simple
             CloseHandle(overlapped_.hEvent);
         }
-        memset(&overlapped_, 0, sizeof(overlapped_));
+        std::memset(&overlapped_, 0, sizeof(overlapped_));
         overlapped_.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
         
         if (!overlapped_.hEvent) {
@@ -220,7 +320,7 @@ private:
             if (event_handle_.is_open()) event_handle_.close();
             event_handle_.assign(overlapped_.hEvent);
         } catch (const std::exception& e) {
-            std::cerr << "Failed to assign event handle: " << e.what() << std::endl;
+            log_ipc(log_sink_, true, std::string("Failed to assign event handle: ") + e.what());
             CloseHandle(overlapped_.hEvent);
             overlapped_.hEvent = NULL;
             CloseHandle(hPipe);
@@ -291,14 +391,15 @@ private:
         // Typically Asio object_handle closes the handle on destruction/close.
         // So we should close event_handle_ here to free the Event object.
         if (event_handle_.is_open()) {
-            event_handle_.close(); // Closes the event handle
+            std::error_code ec;
+            event_handle_.close(ec); // Closes the event handle
         }
         // Also clear overlapped struct
         overlapped_.hEvent = NULL;
 
         auto srv = server_.lock();
         if (srv) {
-            auto conn = std::make_shared<WindowsNamedPipeConnection>(ioc_, hPipe);
+            auto conn = std::make_shared<WindowsNamedPipeConnection>(ioc_, hPipe, log_sink_);
             if (srv->packet_handler_) {
                 conn->start(srv->packet_handler_, srv->disconnect_handler_);
             }
@@ -312,19 +413,16 @@ private:
 
     void cleanup_current() {
         if (current_pipe_ != INVALID_HANDLE_VALUE) {
+            CancelIoEx(current_pipe_, &overlapped_);
+            DisconnectNamedPipe(current_pipe_);
             CloseHandle(current_pipe_);
             current_pipe_ = INVALID_HANDLE_VALUE;
         }
         if (event_handle_.is_open()) {
-            event_handle_.close();
+            std::error_code ec;
+            event_handle_.close(ec);
         }
-        if (overlapped_.hEvent) {
-            // If event_handle_ was open, it closed it. If not, we might need to close it.
-            // But overlapped_.hEvent holds the raw handle.
-            // If we assigned it to event_handle_, event_handle_ closed it.
-            // To be safe, we can check validity, but standard practice is rely on event_handle_.
-            overlapped_.hEvent = NULL;
-        }
+        overlapped_.hEvent = NULL;
     }
 
     void schedule_retry() {
@@ -344,7 +442,8 @@ private:
     asio::windows::object_handle event_handle_;
     OVERLAPPED overlapped_;
     HANDLE current_pipe_;
-    bool closed_ = false;
+    ProcessIPCServer::LogSink log_sink_;
+    std::atomic<bool> closed_{false};
 };
 
 ProcessIPCServer::ProcessIPCServer(asio::io_context& io_context)
@@ -359,7 +458,11 @@ void ProcessIPCServer::set_packet_handler(PacketHandler handler) {
 }
 
 void ProcessIPCServer::set_disconnect_handler(DisconnectHandler handler) {
-    disconnect_handler_ = handler;
+    disconnect_handler_ = std::move(handler);
+}
+
+void ProcessIPCServer::set_log_sink(LogSink sink) {
+    log_sink_ = std::move(sink);
 }
 
 void ProcessIPCServer::set_socks_port(uint16_t port) {
@@ -368,7 +471,7 @@ void ProcessIPCServer::set_socks_port(uint16_t port) {
 
 void ProcessIPCServer::start() {
     if (!acceptor_) {
-        acceptor_ = std::make_shared<NamedPipeAcceptor>(io_context_, shared_from_this());
+        acceptor_ = std::make_shared<NamedPipeAcceptor>(io_context_, shared_from_this(), log_sink_);
         acceptor_->start();
     }
 }

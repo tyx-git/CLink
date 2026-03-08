@@ -7,6 +7,8 @@
 #include <string>
 #include <atomic>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 
 namespace clink::modules {
 
@@ -28,6 +30,8 @@ private:
     std::string endpoint_{"localhost:9100"};
     std::atomic<bool> active_{false};
     std::thread worker_thread_;
+    std::mutex stop_mutex_;
+    std::condition_variable stop_cv_;
 };
 
 }  // namespace clink::modules

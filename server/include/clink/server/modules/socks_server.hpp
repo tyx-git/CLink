@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <thread>
+#include <atomic>
 #include "server/include/clink/core/logging/logger.hpp"
 #include "server/include/clink/core/network/session_manager.hpp"
 
@@ -35,23 +37,44 @@ private:
     uint16_t remote_port_ = 0;
 };
 
-class SocksServer {
+class SocksServer : public std::enable_shared_from_this<SocksServer> {
 public:
+    enum class Backend {
+        None,
+        Asio,
+        WinSock
+    };
+
     SocksServer(asio::io_context& io_context, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager = nullptr);
     ~SocksServer();
 
-    bool start(uint16_t port = 0);
+    bool start(uint16_t port = 0, const std::string& backend = "auto");
     void stop();
     uint16_t port() const;
+    Backend backend() const noexcept { return backend_; }
 
 private:
     void do_accept();
+    void close_acceptor();
+
+#ifdef _WIN32
+    bool start_winsock_backend(uint16_t port);
+    void stop_winsock_backend();
+    void winsock_accept_loop();
+#endif
 
     asio::io_context& io_context_;
-    asio::ip::tcp::acceptor acceptor_;
+    std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
     std::shared_ptr<clink::core::logging::Logger> logger_;
     std::shared_ptr<clink::core::network::SessionManager> session_manager_;
     uint16_t port_ = 0;
+    Backend backend_ = Backend::None;
+
+#ifdef _WIN32
+    std::atomic<bool> winsock_running_{false};
+    std::thread winsock_accept_thread_;
+    uintptr_t winsock_listen_socket_ = 0;
+#endif
 };
 
 } // namespace clink::server::modules

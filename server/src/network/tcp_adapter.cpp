@@ -65,12 +65,14 @@ std::error_code TcpTransportAdapter::start(const std::string& endpoint) {
 }
 
 void TcpTransportAdapter::stop() {
+    stopping_.store(true, std::memory_order_relaxed);
     bool expected = true;
     if (running_.compare_exchange_strong(expected, false)) {
         if (logger_) {
             logger_->info("[tcp] stopping adapter");
         }
         std::error_code ec;
+        socket_.cancel(ec);
         socket_.close(ec);
     }
 }
@@ -164,7 +166,15 @@ void TcpTransportAdapter::do_read_header() {
                     do_receive();
                 }
             } else if (ec != asio::error::operation_aborted) {
-                if (logger_) logger_->error("[tcp] read header error: " + ec.message());
+                if (logger_) {
+                    if (stopping_.load(std::memory_order_relaxed) ||
+                        ec == asio::error::connection_reset ||
+                        ec == asio::error::eof) {
+                        logger_->info("[tcp] read header closed: " + ec.message());
+                    } else {
+                        logger_->error("[tcp] read header error: " + ec.message());
+                    }
+                }
                 stop();
             }
         });
@@ -183,7 +193,15 @@ void TcpTransportAdapter::do_read_body(std::shared_ptr<memory::Block> block, uin
                 }
                 do_receive();
             } else if (ec != asio::error::operation_aborted) {
-                if (logger_) logger_->error("[tcp] read body error: " + ec.message());
+                if (logger_) {
+                    if (stopping_.load(std::memory_order_relaxed) ||
+                        ec == asio::error::connection_reset ||
+                        ec == asio::error::eof) {
+                        logger_->info("[tcp] read body closed: " + ec.message());
+                    } else {
+                        logger_->error("[tcp] read body error: " + ec.message());
+                    }
+                }
                 stop();
             }
         });

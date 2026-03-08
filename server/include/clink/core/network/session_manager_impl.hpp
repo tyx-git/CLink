@@ -50,6 +50,7 @@ public:
     void set_acl(std::shared_ptr<AccessControlList> acl) { acl_ = std::move(acl); }
     void set_policy_engine(std::shared_ptr<policy::PolicyEngine> engine) { policy_engine_ = std::move(engine); }
     void set_session_event_callback(SessionEventCallback cb) override { session_event_cb_ = std::move(cb); }
+    void set_session_idle_timeout(std::chrono::seconds timeout) override { session_idle_timeout_ = timeout; }
 
 protected:
     virtual VirtualInterfacePtr create_interface();
@@ -79,8 +80,15 @@ private:
     std::string interface_address_{"10.8.0.1"};
     std::string interface_netmask_{"255.255.255.0"};
     bool virtual_interface_enabled_{true};
-    
+    std::chrono::seconds session_idle_timeout_{std::chrono::seconds(0)};
+
+    std::atomic<uint32_t> tun_read_error_streak_{0};
+    std::atomic<uint64_t> tun_read_loop_counter_{0};
+    std::atomic<uint64_t> network_to_tun_counter_{0};
+    uint32_t telemetry_sample_every_{64};
+
     asio::steady_timer heartbeat_timer_;
+    asio::steady_timer tun_retry_timer_;
 };
 
 /**

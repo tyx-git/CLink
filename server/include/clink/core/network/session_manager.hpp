@@ -6,6 +6,7 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <functional>
+#include <chrono>
 
 #include "server/include/clink/core/network/transport_adapter.hpp"
 #include "server/include/clink/core/network/transport_listener.hpp"
@@ -131,6 +132,11 @@ public:
      * @brief 设置会话状态事件回调
      */
     virtual void set_session_event_callback(SessionEventCallback cb) = 0;
+
+    /**
+     * @brief 设置空闲会话超时，0 表示禁用
+     */
+    virtual void set_session_idle_timeout(std::chrono::seconds timeout) = 0;
 };
 
 using SessionManagerPtr = std::shared_ptr<SessionManager>;

@@ -30,6 +30,7 @@ void MetricsModule::stop() {
         return;
     }
     active_ = false;
+    stop_cv_.notify_all();
     if (worker_thread_.joinable()) {
         worker_thread_.join();
     }
@@ -40,8 +41,14 @@ void MetricsModule::stop() {
 
 void MetricsModule::collect_loop() {
     while (active_) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-        
+        {
+            std::unique_lock<std::mutex> lock(stop_mutex_);
+            stop_cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return !active_.load(); });
+        }
+        if (!active_) {
+            break;
+        }
+
         if (!session_manager_) continue;
 
         auto sessions = session_manager_->get_active_sessions();

@@ -21,11 +21,23 @@ class SocksServer;
 
 class ProcessManager {
 public:
+    enum class StartState {
+        Failed,
+        Ready,
+        Degraded
+    };
+
     ProcessManager(asio::io_context& io_context, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager = nullptr);
     ~ProcessManager();
 
     bool start(const clink::core::config::Configuration& config);
     void stop();
+
+    [[nodiscard]] StartState start_state() const noexcept { return start_state_; }
+    [[nodiscard]] bool is_degraded() const noexcept { return start_state_ == StartState::Degraded; }
+    [[nodiscard]] bool socks_available() const noexcept { return socks_available_; }
+    [[nodiscard]] const std::string& start_reason() const noexcept { return start_reason_; }
+    [[nodiscard]] const std::string& socks_backend() const noexcept { return socks_backend_; }
 
 private:
     asio::io_context& io_context_;
@@ -40,6 +52,10 @@ private:
 #endif
     
     bool running_ = false;
+    bool socks_available_ = false;
+    StartState start_state_ = StartState::Failed;
+    std::string start_reason_ = "not_started";
+    std::string socks_backend_ = "none";
 };
 
 } // namespace clink::server::modules

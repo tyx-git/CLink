@@ -2,11 +2,15 @@
 
 #ifdef _WIN32
 
+#include <array>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
-#include <asio.hpp>
 #include <vector>
-#include <deque>
+
+#include <asio.hpp>
+
 #include "server/include/clink/core/logging/logger.hpp"
 #include "server/include/clink/core/network/session_manager.hpp"
 #include "process_ipc_server.hpp" // For IPCConnection
@@ -15,11 +19,11 @@ namespace clink::server::modules {
 
 class IpcProxySession : public std::enable_shared_from_this<IpcProxySession> {
 public:
-    IpcProxySession(asio::io_context& io_context, 
-                   std::shared_ptr<clink::hook::IPCConnection> ipc_conn,
-                   uint64_t socket_id,
-                   std::shared_ptr<clink::core::logging::Logger> logger,
-                   std::shared_ptr<clink::core::network::SessionManager> session_manager = nullptr)
+    IpcProxySession(asio::io_context& io_context,
+                    std::shared_ptr<clink::hook::IPCConnection> ipc_conn,
+                    uint64_t socket_id,
+                    std::shared_ptr<clink::core::logging::Logger> logger,
+                    std::shared_ptr<clink::core::network::SessionManager> session_manager = nullptr)
         : remote_socket_(io_context),
           resolver_(io_context),
           ipc_conn_(ipc_conn),
@@ -35,120 +39,207 @@ public:
         auto self = shared_from_this();
         resolver_.async_resolve(host, std::to_string(port),
             [this, self, host, port](std::error_code ec, asio::ip::tcp::resolver::results_type results) {
-                if (!ec) {
-                    if (session_manager_) {
-                         std::string vip = session_manager_->get_virtual_interface_address();
-                         if (!vip.empty()) {
-                             asio::error_code bind_ec;
-                             remote_socket_.open(asio::ip::tcp::v4(), bind_ec);
-                             if (!bind_ec) {
-                                 remote_socket_.bind(asio::ip::tcp::endpoint(asio::ip::make_address(vip), 0), bind_ec);
-                             }
-                         }
+                if (ec) {
+                    if (logger_) {
+                        logger_->warn("Failed to resolve target {}:{}: {}", host, port, ec.message());
                     }
-                    asio::async_connect(remote_socket_, results,
-                        [this, self, host, port](std::error_code ec, asio::ip::tcp::endpoint) {
-                            if (!ec) {
-                                std::lock_guard<std::recursive_mutex> lock(mutex_);
-                                connected_ = true;
-                                logger_->debug("Connected to target {}:{} for socket {}", host, port, socket_id_);
-                                do_read();
-                                if (!outbox_.empty()) {
-                                    do_write();
-                                }
-                            } else {
-                                logger_->warn("Failed to connect to target {}:{}: {}", host, port, ec.message());
-                                close();
-                            }
-                        });
-                } else {
-                    logger_->warn("Failed to resolve target {}:{}: {}", host, port, ec.message());
                     close();
+                    return;
                 }
+
+                if (session_manager_) {
+                    std::string vip = session_manager_->get_virtual_interface_address();
+                    if (!vip.empty() && !results.empty()) {
+                        asio::error_code addr_ec;
+                        const auto bind_addr = asio::ip::make_address(vip, addr_ec);
+                        if (!addr_ec) {
+                            asio::error_code open_ec;
+                            asio::error_code bind_ec;
+                            remote_socket_.open(results.begin()->endpoint().protocol(), open_ec);
+                            if (!open_ec) {
+                                remote_socket_.bind(asio::ip::tcp::endpoint(bind_addr, 0), bind_ec);
+                                if (bind_ec) {
+                                    if (logger_) {
+                                        logger_->warn("Failed to bind IPC proxy socket to VIP {}: {}", vip, bind_ec.message());
+                                    }
+                                    asio::error_code close_ec;
+                                    remote_socket_.close(close_ec);
+                                }
+                            }
+                        } else if (logger_) {
+                            logger_->warn("Invalid VIP address {}: {}", vip, addr_ec.message());
+                        }
+                    }
+                }
+
+                asio::async_connect(remote_socket_, results,
+                    [this, self, host, port](std::error_code connect_ec, asio::ip::tcp::endpoint) {
+                        if (connect_ec) {
+                            if (logger_) {
+                                logger_->warn("Failed to connect to target {}:{}: {}", host, port, connect_ec.message());
+                            }
+                            close();
+                            return;
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            connected_ = true;
+                        }
+
+                        if (logger_) {
+                            logger_->debug("Connected to target {}:{} for socket {}", host, port, socket_id_);
+                        }
+                        do_read();
+                        schedule_write_if_needed();
+                    });
             });
     }
 
     void send_data(const std::vector<char>& data) {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        bool write_in_progress = !outbox_.empty();
-        outbox_.push_back(data);
-        if (connected_ && !write_in_progress) {
-            do_write();
+        bool overflow = false;
+        std::size_t queued_snapshot = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (closed_) {
+                return;
+            }
+
+            if (queued_bytes_ + data.size() > kMaxQueuedBytes) {
+                overflow = true;
+                queued_snapshot = queued_bytes_;
+            } else {
+                outbox_.push_back(data);
+                queued_bytes_ += data.size();
+            }
         }
+
+        if (overflow) {
+            if (logger_) {
+                logger_->warn("IPC proxy queue overflow for socket {}: queued={} incoming={} limit={}",
+                              socket_id_, queued_snapshot, data.size(), kMaxQueuedBytes);
+            }
+            close();
+            return;
+        }
+
+        schedule_write_if_needed();
     }
 
     void set_close_handler(std::function<void(uint64_t)> handler) {
+        std::lock_guard<std::mutex> lock(mutex_);
         close_handler_ = std::move(handler);
     }
 
     void close() {
-        if (closed_) return;
-        closed_ = true;
+        std::function<void(uint64_t)> handler;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (closed_) {
+                return;
+            }
+            closed_ = true;
+            connected_ = false;
+            write_in_progress_ = false;
+            queued_bytes_ = 0;
+            outbox_.clear();
+            handler = std::move(close_handler_);
+        }
 
+        asio::error_code ec;
+        resolver_.cancel();
         if (remote_socket_.is_open()) {
-            asio::error_code ec;
+            remote_socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ec);
             remote_socket_.close(ec);
         }
-        
-        if (close_handler_) {
-            close_handler_(socket_id_);
+
+        if (handler) {
+            handler(socket_id_);
         }
     }
 
 private:
-    std::recursive_mutex mutex_;
-
     void do_read() {
         auto self = shared_from_this();
         remote_socket_.async_read_some(asio::buffer(buffer_),
             [this, self](std::error_code ec, std::size_t length) {
-                if (!ec) {
-                    if (auto conn = ipc_conn_.lock()) {
-                        std::vector<char> data(buffer_.begin(), buffer_.begin() + length);
-                        conn->write_packet(clink::hook::ipc::PacketType::DataRecv, socket_id_, data);
-                    } else {
-                        close();
-                        return;
-                    }
-                    do_read();
-                } else {
-                    if (ec != asio::error::operation_aborted) {
+                if (ec) {
+                    if (ec != asio::error::operation_aborted && logger_) {
                         logger_->debug("Remote connection closed for socket {}: {}", socket_id_, ec.message());
                     }
                     close();
+                    return;
                 }
-            });
-    }
 
-    void do_write() {
-        // Assumes mutex_ is locked by caller
-        auto self = shared_from_this();
-        asio::async_write(remote_socket_, asio::buffer(outbox_.front()),
-            [this, self](std::error_code ec, std::size_t) {
-                std::lock_guard<std::recursive_mutex> lock(mutex_);
-                if (!ec) {
-                    outbox_.pop_front();
-                    if (!outbox_.empty()) {
-                        do_write();
-                    }
+                if (auto conn = ipc_conn_.lock()) {
+                    std::vector<char> data(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(length));
+                    conn->write_packet(clink::hook::ipc::PacketType::DataRecv, socket_id_, data);
                 } else {
-                    logger_->warn("Write failed for socket {}: {}", socket_id_, ec.message());
                     close();
+                    return;
+                }
+
+                do_read();
+            });
+    }
+
+    void schedule_write_if_needed() {
+        std::shared_ptr<std::vector<char>> chunk;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (closed_ || !connected_ || write_in_progress_ || outbox_.empty()) {
+                return;
+            }
+            write_in_progress_ = true;
+            chunk = std::make_shared<std::vector<char>>(outbox_.front());
+        }
+
+        auto self = shared_from_this();
+        asio::async_write(remote_socket_, asio::buffer(*chunk),
+            [this, self, chunk](std::error_code ec, std::size_t) {
+                bool continue_write = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    write_in_progress_ = false;
+
+                    if (!ec) {
+                        if (!outbox_.empty()) {
+                            queued_bytes_ -= outbox_.front().size();
+                            outbox_.pop_front();
+                        }
+                        continue_write = connected_ && !closed_ && !outbox_.empty();
+                    }
+                }
+
+                if (ec) {
+                    if (logger_) {
+                        logger_->warn("Write failed for socket {}: {}", socket_id_, ec.message());
+                    }
+                    close();
+                    return;
+                }
+
+                if (continue_write) {
+                    schedule_write_if_needed();
                 }
             });
     }
 
+    std::mutex mutex_;
     asio::ip::tcp::socket remote_socket_;
     asio::ip::tcp::resolver resolver_;
     std::weak_ptr<clink::hook::IPCConnection> ipc_conn_;
     uint64_t socket_id_;
     std::shared_ptr<clink::core::logging::Logger> logger_;
     std::shared_ptr<clink::core::network::SessionManager> session_manager_;
-    std::array<char, 8192> buffer_;
+    std::array<char, 8192> buffer_{};
     std::deque<std::vector<char>> outbox_;
     std::function<void(uint64_t)> close_handler_;
+    static constexpr std::size_t kMaxQueuedBytes = 4 * 1024 * 1024;
+    std::size_t queued_bytes_ = 0;
     bool closed_ = false;
     bool connected_ = false;
+    bool write_in_progress_ = false;
 };
 
 } // namespace clink::server::modules

@@ -251,6 +251,14 @@ void LogConfig::add_default_sinks() {
     console_sink.enabled = true;
     console_sink.level = level;
     sinks.push_back(console_sink);
+
+    // Add dedicated CLI log file by default
+    SinkConfig file_sink;
+    file_sink.type = SinkType::File;
+    file_sink.enabled = true;
+    file_sink.level = level;
+    file_sink.path = "logs/clink-cli.log";
+    sinks.push_back(file_sink);
 }
 
 }  // namespace clink::core::logging
