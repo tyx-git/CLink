@@ -48,7 +48,8 @@ private:
     ReceiveCallback receive_callback_;
     ZeroCopyReceiveCallback zero_copy_receive_callback_;
     std::atomic<bool> running_{false};
-    
+    std::atomic<bool> stopping_{false};
+
     asio::ip::tcp::socket socket_;
     std::string remote_endpoint_;
     std::vector<uint8_t> receive_buffer_;

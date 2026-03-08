@@ -7,6 +7,14 @@
 #include <winioctl.h>
 #include <ws2tcpip.h>
 #include <winreg.h>
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#endif
+#include "external/wintun/include/wintun.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #include <asio/windows/stream_handle.hpp>
 #include <asio/windows/object_handle.hpp>
 #include <optional>
@@ -14,6 +22,7 @@
 #include <algorithm>
 #include <mutex>
 #include <vector>
+#include <iostream>
 
 // TAP-Windows IOCTLs
 #define TAP_CONTROL_CODE(request,method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
@@ -28,25 +37,22 @@
 #define TAP_IOCTL_CONFIG_DHCP_SET_OPT   TAP_CONTROL_CODE(9, METHOD_BUFFERED)
 #define TAP_IOCTL_CONFIG_TUN            TAP_CONTROL_CODE(10, METHOD_BUFFERED)
 
-struct WINTUN_ADAPTER;
-struct WINTUN_SESSION;
-
 namespace {
 
 constexpr DWORD kDefaultRingCapacity = 4 * 1024 * 1024;  // 4MB ring buffer
 
 class WintunApi {
 public:
-    using OpenAdapterFn = WINTUN_ADAPTER* (WINAPI*)(const wchar_t*);
-    using CreateAdapterFn = WINTUN_ADAPTER* (WINAPI*)(const wchar_t*, const wchar_t*, const GUID*);
-    using CloseAdapterFn = void (WINAPI*)(WINTUN_ADAPTER*);
-    using StartSessionFn = WINTUN_SESSION* (WINAPI*)(WINTUN_ADAPTER*, DWORD);
-    using EndSessionFn = void (WINAPI*)(WINTUN_SESSION*);
-    using ReceivePacketFn = BYTE* (WINAPI*)(WINTUN_SESSION*, DWORD*);
-    using ReleaseReceivePacketFn = void (WINAPI*)(WINTUN_SESSION*, BYTE*);
-    using AllocateSendPacketFn = BYTE* (WINAPI*)(WINTUN_SESSION*, DWORD);
-    using SendPacketFn = void (WINAPI*)(WINTUN_SESSION*, BYTE*);
-    using GetReadWaitEventFn = HANDLE (WINAPI*)(WINTUN_SESSION*);
+    using OpenAdapterFn = WINTUN_OPEN_ADAPTER_FUNC*;
+    using CreateAdapterFn = WINTUN_CREATE_ADAPTER_FUNC*;
+    using CloseAdapterFn = WINTUN_CLOSE_ADAPTER_FUNC*;
+    using StartSessionFn = WINTUN_START_SESSION_FUNC*;
+    using EndSessionFn = WINTUN_END_SESSION_FUNC*;
+    using ReceivePacketFn = WINTUN_RECEIVE_PACKET_FUNC*;
+    using ReleaseReceivePacketFn = WINTUN_RELEASE_RECEIVE_PACKET_FUNC*;
+    using AllocateSendPacketFn = WINTUN_ALLOCATE_SEND_PACKET_FUNC*;
+    using SendPacketFn = WINTUN_SEND_PACKET_FUNC*;
+    using GetReadWaitEventFn = WINTUN_GET_READ_WAIT_EVENT_FUNC*;
 
     static WintunApi& instance() {
         static WintunApi api;
@@ -58,7 +64,62 @@ public:
             return true;
         }
 
+        const wchar_t* arch_dir = L"x86";
+        const char* arch_tag = "x86";
+#if defined(_M_X64) || defined(__x86_64__)
+        arch_dir = L"amd64";
+        arch_tag = "amd64";
+#elif defined(_M_ARM64) || defined(__aarch64__)
+        arch_dir = L"arm64";
+        arch_tag = "arm64";
+#endif
+
+        auto dirname = [](const std::wstring& path) -> std::wstring {
+            const size_t pos = path.find_last_of(L"\\/");
+            if (pos == std::wstring::npos) {
+                return {};
+            }
+            return path.substr(0, pos);
+        };
+
+        auto join = [](const std::wstring& a, const std::wstring& b) -> std::wstring {
+            if (a.empty()) return b;
+            if (a.back() == L'\\' || a.back() == L'/') return a + b;
+            return a + L"\\" + b;
+        };
+
         std::vector<std::wstring> candidates;
+        auto push_unique = [&candidates](const std::wstring& path) {
+            if (path.empty()) return;
+            if (std::find(candidates.begin(), candidates.end(), path) == candidates.end()) {
+                candidates.push_back(path);
+            }
+        };
+
+        // 1) 优先同目录（可执行文件旁）
+        wchar_t exe_path[MAX_PATH] = {};
+        if (GetModuleFileNameW(nullptr, exe_path, MAX_PATH) > 0) {
+            const std::wstring exe_dir = dirname(exe_path);
+            if (!exe_dir.empty()) {
+                push_unique(join(exe_dir, L"wintun.dll"));
+            }
+        }
+
+        // 2) 明确从当前工作目录和其父目录递归寻找 external/wintun/bin/<arch>/wintun.dll
+        wchar_t cwd_buf[MAX_PATH] = {};
+        if (GetCurrentDirectoryW(MAX_PATH, cwd_buf) > 0) {
+            std::wstring cur = cwd_buf;
+            for (int depth = 0; depth < 8 && !cur.empty(); ++depth) {
+                const std::wstring ext_root = join(cur, L"external\\wintun");
+                push_unique(join(join(join(ext_root, L"bin"), arch_dir), L"wintun.dll"));
+                push_unique(join(join(ext_root, arch_dir), L"wintun.dll"));
+                push_unique(join(join(ext_root, L"bin"), L"wintun.dll"));
+                push_unique(join(ext_root, L"wintun.dll"));
+                cur = dirname(cur);
+            }
+        }
+
+        // 3) 最后退回默认搜索与系统目录
         candidates.emplace_back(L"wintun.dll");
         wchar_t system_path[MAX_PATH] = {};
         if (GetSystemDirectoryW(system_path, MAX_PATH)) {
@@ -67,37 +128,65 @@ public:
             candidates.push_back(std::move(path));
         }
 
+        auto wide_to_utf8 = [](const std::wstring& ws) -> std::string {
+            if (ws.empty()) return {};
+            int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            if (len <= 0) return {};
+            std::string out(static_cast<size_t>(len - 1), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, out.data(), len, nullptr, nullptr);
+            return out;
+        };
+
+        std::wstring loaded_path;
         for (const auto& dll_path : candidates) {
             module_ = LoadLibraryW(dll_path.c_str());
             if (module_) {
+                loaded_path = dll_path;
                 break;
             }
         }
 
         if (!module_) {
+            std::cerr << "[virtual_interface] DLL from " << arch_tag
+                      << " loading failed" << std::endl;
             return false;
         }
 
+        std::cerr << "[virtual_interface] DLL from " << arch_tag
+                  << " loading success: " << wide_to_utf8(loaded_path) << std::endl;
+
+        auto load_proc = [this](auto& fn, const char* name) -> bool {
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-function-type"
 #endif
-#define LOAD_PROC(name) name = reinterpret_cast<decltype(name)>(GetProcAddress(module_, #name)); \
-        if (!(name)) { FreeLibrary(module_); module_ = nullptr; return false; }
-        LOAD_PROC(WintunOpenAdapter);
-        LOAD_PROC(WintunCreateAdapter);
-        LOAD_PROC(WintunCloseAdapter);
-        LOAD_PROC(WintunStartSession);
-        LOAD_PROC(WintunEndSession);
-        LOAD_PROC(WintunReceivePacket);
-        LOAD_PROC(WintunReleaseReceivePacket);
-        LOAD_PROC(WintunAllocateSendPacket);
-        LOAD_PROC(WintunSendPacket);
-        LOAD_PROC(WintunGetReadWaitEvent);
-#undef LOAD_PROC
+            fn = reinterpret_cast<std::decay_t<decltype(fn)>>(GetProcAddress(module_, name));
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
+            if (!fn) {
+                const DWORD err = GetLastError();
+                std::cerr << "[virtual_interface] GetProcAddress failed name='" << name
+                          << "' err=" << err << std::endl;
+                return false;
+            }
+            return true;
+        };
+
+        if (!load_proc(WintunOpenAdapter, "WintunOpenAdapter") ||
+            !load_proc(WintunCreateAdapter, "WintunCreateAdapter") ||
+            !load_proc(WintunCloseAdapter, "WintunCloseAdapter") ||
+            !load_proc(WintunStartSession, "WintunStartSession") ||
+            !load_proc(WintunEndSession, "WintunEndSession") ||
+            !load_proc(WintunReceivePacket, "WintunReceivePacket") ||
+            !load_proc(WintunReleaseReceivePacket, "WintunReleaseReceivePacket") ||
+            !load_proc(WintunAllocateSendPacket, "WintunAllocateSendPacket") ||
+            !load_proc(WintunSendPacket, "WintunSendPacket") ||
+            !load_proc(WintunGetReadWaitEvent, "WintunGetReadWaitEvent")) {
+            FreeLibrary(module_);
+            module_ = nullptr;
+            return false;
+        }
 
         return true;
     }
@@ -135,12 +224,22 @@ std::string narrow(const std::wstring& text) {
     if (text.empty()) {
         return {};
     }
-    int len = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    const int len = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
     if (len <= 0) {
+        const DWORD err = GetLastError();
+        std::cerr << "[virtual_interface] narrow size query failed err=" << err << std::endl;
         return {};
     }
-    std::string utf8(static_cast<size_t>(len - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, utf8.data(), len, nullptr, nullptr);
+    std::string utf8(static_cast<size_t>(len), '\0');
+    const int written = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, utf8.data(), len, nullptr, nullptr);
+    if (written <= 0) {
+        const DWORD err = GetLastError();
+        std::cerr << "[virtual_interface] narrow conversion failed err=" << err << std::endl;
+        return {};
+    }
+    if (!utf8.empty() && utf8.back() == '\0') {
+        utf8.pop_back();
+    }
     return utf8;
 }
 
@@ -148,12 +247,22 @@ std::wstring widen(const std::string& text) {
     if (text.empty()) {
         return {};
     }
-    int len = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    const int len = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
     if (len <= 0) {
+        const DWORD err = GetLastError();
+        std::cerr << "[virtual_interface] widen size query failed err=" << err << std::endl;
         return {};
     }
-    std::wstring wide(static_cast<size_t>(len - 1), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wide.data(), len);
+    std::wstring wide(static_cast<size_t>(len), L'\0');
+    const int written = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wide.data(), len);
+    if (written <= 0) {
+        const DWORD err = GetLastError();
+        std::cerr << "[virtual_interface] widen conversion failed err=" << err << std::endl;
+        return {};
+    }
+    if (!wide.empty() && wide.back() == L'\0') {
+        wide.pop_back();
+    }
     return wide;
 }
 
@@ -293,8 +402,70 @@ std::vector<AdapterCandidate> EnumerateWintunAdapters() {
 }
 
 std::vector<AdapterCandidate> BuildAdapterPriorityList(const std::string& requested) {
-    auto taps = EnumerateTapAdapters();
-    auto wintuns = EnumerateWintunAdapters();
+    const std::string force_backend = []() {
+        if (const char* env = std::getenv("CLINK_VIF_BACKEND")) {
+            return toLowerCopy(std::string(env));
+        }
+        return std::string{};
+    }();
+
+    const bool skip_wintun = [&]() {
+        if (force_backend == "tap") return true;
+        if (const char* env = std::getenv("CLINK_VIF_SKIP_WINTUN")) {
+            return std::string(env) == "1";
+        }
+        return false;
+    }();
+    const bool skip_tap = [&]() {
+        if (force_backend == "wintun") return true;
+        if (const char* env = std::getenv("CLINK_VIF_SKIP_TAP")) {
+            return std::string(env) == "1";
+        }
+        return false;
+    }();
+
+    std::cerr << "[virtual_interface] adapter_select requested='" << requested
+              << "' force_backend='" << (force_backend.empty() ? "auto" : force_backend)
+              << "' skip_wintun=" << (skip_wintun ? "1" : "0")
+              << " skip_tap=" << (skip_tap ? "1" : "0") << std::endl;
+
+    auto taps = skip_tap ? std::vector<AdapterCandidate>{} : EnumerateTapAdapters();
+
+    std::vector<AdapterCandidate> wintuns;
+    bool wintun_dll_loaded = false;
+    if (!skip_wintun) {
+        // 先主动尝试加载 DLL，明确输出 success/failed 日志
+        wintun_dll_loaded = WintunApi::instance().load();
+        wintuns = EnumerateWintunAdapters();
+
+        // DLL 已加载但没有任何实例时，加入一个“可创建”的伪候选，
+        // 让 open_wintun_adapter 走 OpenAdapter->CreateAdapter 流程。
+        if (wintun_dll_loaded && wintuns.empty()) {
+            AdapterCandidate bootstrap;
+            bootstrap.type = AdapterType::Wintun;
+            bootstrap.identifier = requested.empty() ? "clink0" : requested;
+            bootstrap.friendly_w = widen(bootstrap.identifier);
+            if (bootstrap.friendly_w.empty()) {
+                bootstrap.friendly_w = L"clink0";
+            }
+            bootstrap.friendly = narrow(bootstrap.friendly_w);
+            if (bootstrap.friendly.empty()) {
+                bootstrap.friendly = "clink0";
+            }
+            bootstrap.normalized_name = toLowerCopy(bootstrap.friendly);
+            bootstrap.normalized_identifier = normalizeGuid(bootstrap.identifier);
+            wintuns.push_back(std::move(bootstrap));
+            std::cerr << "[virtual_interface] no adapter found, bootstrap candidate created for wintun" << std::endl;
+        }
+    }
+
+    if (taps.empty() && wintuns.empty()) {
+        if (!skip_wintun && !wintun_dll_loaded) {
+            std::cerr << "[virtual_interface] no such adapter (wintun dll unavailable)" << std::endl;
+        } else {
+            std::cerr << "[virtual_interface] no such adapter" << std::endl;
+        }
+    }
     std::vector<AdapterCandidate> ordered;
 
     auto push_unique = [&ordered](const AdapterCandidate& cand) {
@@ -384,15 +555,16 @@ public:
     using VirtualInterface::write_packet;
 
     explicit WindowsVirtualInterface(asio::io_context& io_context)
-        : io_context_(io_context), 
-          strand_(asio::make_strand(io_context)),
-          timer_(io_context), 
-          stream_handle_(io_context),
-          wintun_wait_handle_(io_context) {}
+        : io_context_(io_context) {
+        std::cerr << "[virtual_interface] WindowsVirtualInterface.ctor ok (lazy handle init)" << std::endl;
+    }
 
     std::error_code open(const std::string& name,
                          const std::string& address,
                          const std::string& netmask) override {
+        std::cerr << "[virtual_interface] open.begin name='" << name
+                  << "' address='" << address
+                  << "' netmask='" << netmask << "'" << std::endl;
         close();
 
         std::string requested = name;
@@ -409,22 +581,33 @@ public:
         }
 
         std::error_code last_error;
+        std::cerr << "[virtual_interface] candidate_count=" << candidates.size() << std::endl;
         for (const auto& candidate : candidates) {
+            const char* typ = (candidate.type == AdapterType::Wintun) ? "wintun" : "tap";
+            std::cerr << "[virtual_interface] candidate.try type=" << typ
+                      << " id='" << candidate.identifier
+                      << "' friendly='" << candidate.friendly << "'" << std::endl;
             if (candidate.type == AdapterType::Wintun) {
                 auto ec = open_wintun_adapter(candidate);
                 if (!ec) {
                     backend_ = BackendType::Wintun;
                     name_ = candidate.friendly.empty() ? "wintun" : candidate.friendly;
+                    std::cerr << "[virtual_interface] candidate.ok type=wintun name='" << name_ << "'" << std::endl;
                     return {};
                 }
+                std::cerr << "[virtual_interface] candidate.fail type=wintun ec=" << ec.value()
+                          << " message='" << ec.message() << "'" << std::endl;
                 last_error = ec;
             } else {
                 auto ec = open_tap_adapter(candidate, address, netmask);
                 if (!ec) {
                     backend_ = BackendType::Tap;
                     name_ = candidate.friendly.empty() ? candidate.identifier : candidate.friendly;
+                    std::cerr << "[virtual_interface] candidate.ok type=tap name='" << name_ << "'" << std::endl;
                     return {};
                 }
+                std::cerr << "[virtual_interface] candidate.fail type=tap ec=" << ec.value()
+                          << " message='" << ec.message() << "'" << std::endl;
                 last_error = ec;
             }
         }
@@ -434,17 +617,16 @@ public:
 
     void close() override {
         if (backend_ == BackendType::Tap) {
-            if (stream_handle_.is_open()) {
+            if (stream_handle_ && stream_handle_->is_open()) {
                 std::error_code ignored;
-                stream_handle_.cancel(ignored);
-                stream_handle_.close();
+                stream_handle_->cancel(ignored);
+                stream_handle_->close(ignored);
             }
-            timer_.cancel();
         } else if (backend_ == BackendType::Wintun) {
-            if (wintun_wait_handle_.is_open()) {
+            if (wintun_wait_handle_ && wintun_wait_handle_->is_open()) {
                 std::error_code ignored;
-                wintun_wait_handle_.cancel(ignored);
-                wintun_wait_handle_.close();
+                wintun_wait_handle_->cancel(ignored);
+                wintun_wait_handle_->close(ignored);
             }
             auto& api = WintunApi::instance();
             if (wintun_session_) {
@@ -453,7 +635,11 @@ public:
             }
             if (wintun_adapter_) {
                 api.WintunCloseAdapter(wintun_adapter_);
+                if (wintun_adapter_created_by_us_) {
+                    std::cerr << "[virtual_interface] Wintun adapter closed (created by current process)" << std::endl;
+                }
                 wintun_adapter_ = nullptr;
+                wintun_adapter_created_by_us_ = false;
             }
             wintun_wait_event_ = NULL;
         }
@@ -465,18 +651,18 @@ public:
     void async_read_packet(std::shared_ptr<clink::core::memory::Block> buffer,
                            std::function<void(std::error_code, size_t)> callback) override {
         if (backend_ == BackendType::Wintun) {
-            asio::post(strand_, [this, buffer, callback]() {
+            asio::post(io_context_, [this, buffer, callback]() {
                 wintun_dispatch_read(buffer, callback);
             });
             return;
         }
 
-        if (!stream_handle_.is_open()) {
+        if (!stream_handle_ || !stream_handle_->is_open()) {
             callback(std::make_error_code(std::errc::not_connected), 0);
             return;
         }
 
-        stream_handle_.async_read_some(
+        stream_handle_->async_read_some(
             asio::buffer(read_buffer_, sizeof(read_buffer_)),
             [this, buffer, callback](const std::error_code& ec, size_t bytes_transferred) {
                 if (ec) {
@@ -531,7 +717,7 @@ public:
             return {};
         }
 
-        if (!stream_handle_.is_open()) {
+        if (!stream_handle_ || !stream_handle_->is_open()) {
              return std::make_error_code(std::errc::not_connected);
         }
 
@@ -547,7 +733,7 @@ public:
 
         std::memcpy(packet->data() + sizeof(EthernetHeader), data, size);
 
-        asio::post(strand_, [this, packet]() {
+        asio::post(io_context_, [this, packet]() {
             bool write_in_progress = !write_queue_.empty();
             write_queue_.push_back(packet);
             if (!write_in_progress) {
@@ -574,13 +760,44 @@ private:
 
     std::error_code open_wintun_adapter(const AdapterCandidate& candidate);
 
+    bool ensure_stream_handle() {
+        if (!stream_handle_) {
+            try {
+                stream_handle_ = std::make_unique<asio::windows::stream_handle>(io_context_);
+                std::cerr << "[virtual_interface] lazy init stream_handle ok" << std::endl;
+            } catch (const std::exception& ex) {
+                std::cerr << "[virtual_interface] lazy init stream_handle failed: " << ex.what() << std::endl;
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool ensure_wintun_wait_handle() {
+        if (!wintun_wait_handle_) {
+            try {
+                wintun_wait_handle_ = std::make_unique<asio::windows::object_handle>(io_context_);
+                std::cerr << "[virtual_interface] lazy init wintun_wait_handle ok" << std::endl;
+            } catch (const std::exception& ex) {
+                std::cerr << "[virtual_interface] lazy init wintun_wait_handle failed: " << ex.what() << std::endl;
+                return false;
+            }
+        }
+        return true;
+    }
+
     void wintun_dispatch_read(std::shared_ptr<clink::core::memory::Block> buffer,
                               std::function<void(std::error_code, size_t)> callback);
 
     void do_write() {
         auto buffer = write_queue_.front();
-        asio::async_write(stream_handle_, asio::buffer(*buffer),
-            asio::bind_executor(strand_, [this, buffer](std::error_code ec, size_t /*length*/) {
+        if (!stream_handle_ || !stream_handle_->is_open()) {
+            write_queue_.clear();
+            return;
+        }
+
+        asio::async_write(*stream_handle_, asio::buffer(*buffer),
+            [this, buffer](std::error_code ec, size_t /*length*/) {
                 if (ec) {
                     std::cerr << "[virtual_interface] async_write failed: " << ec.message() << std::endl;
                 }
@@ -588,7 +805,7 @@ private:
                 if (!write_queue_.empty()) {
                     do_write();
                 }
-            }));
+            });
     }
 
     void HandleArp(size_t bytes) {
@@ -621,7 +838,7 @@ private:
         std::memcpy(arp_res->target_mac, arp_req->sender_mac, 6);
         arp_res->target_ip = arp_req->sender_ip;
 
-        asio::post(strand_, [this, reply]() {
+        asio::post(io_context_, [this, reply]() {
             bool write_in_progress = !write_queue_.empty();
             write_queue_.push_back(reply);
             if (!write_in_progress) {
@@ -631,10 +848,8 @@ private:
     }
 
     asio::io_context& io_context_;
-    asio::strand<asio::io_context::executor_type> strand_;
-    asio::steady_timer timer_;
-    asio::windows::stream_handle stream_handle_;
-    asio::windows::object_handle wintun_wait_handle_;
+    std::unique_ptr<asio::windows::stream_handle> stream_handle_;
+    std::unique_ptr<asio::windows::object_handle> wintun_wait_handle_;
     BackendType backend_{BackendType::None};
     std::string name_;
     uint8_t mac_address_[6]{};
@@ -642,11 +857,12 @@ private:
     struct in_addr local_ip_{};
     struct in_addr netmask_ip_{};
 
-    WINTUN_ADAPTER* wintun_adapter_{nullptr};
-    WINTUN_SESSION* wintun_session_{nullptr};
+    WINTUN_ADAPTER_HANDLE wintun_adapter_{nullptr};
+    WINTUN_SESSION_HANDLE wintun_session_{nullptr};
+    bool wintun_adapter_created_by_us_{false};
     HANDLE wintun_wait_event_{NULL};
     std::mutex wintun_send_mutex_;
-    
+
     uint8_t read_buffer_[2048]{};
     std::deque<std::shared_ptr<std::vector<uint8_t>>> write_queue_;
 };
@@ -654,6 +870,10 @@ private:
 std::error_code WindowsVirtualInterface::open_tap_adapter(const AdapterCandidate& candidate,
                                                           const std::string& address,
                                                           const std::string& netmask) {
+    if (!ensure_stream_handle()) {
+        return std::make_error_code(std::errc::not_connected);
+    }
+
     std::string path = "\\\\.\\Global\\" + candidate.identifier + ".tap";
     HANDLE handle = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
@@ -691,13 +911,16 @@ std::error_code WindowsVirtualInterface::open_tap_adapter(const AdapterCandidate
     if (!DeviceIoControl(handle, TAP_IOCTL_CONFIG_TUN, &config, sizeof(config), &config, sizeof(config), &len, NULL)) {
         DWORD err = GetLastError();
         CloseHandle(handle);
-        return std::error_code(err, std::system_category());
+        return std::error_code(static_cast<int>(err), std::system_category());
     }
 
     uint32_t status = 1;
     DeviceIoControl(handle, TAP_IOCTL_SET_MEDIA_STATUS, &status, sizeof(status), &status, sizeof(status), &len, NULL);
 
-    stream_handle_.assign(handle);
+    if (!stream_handle_) {
+        return std::make_error_code(std::errc::not_connected);
+    }
+    stream_handle_->assign(handle);
     return {};
 }
 
@@ -715,41 +938,78 @@ std::error_code WindowsVirtualInterface::open_wintun_adapter(const AdapterCandid
         friendly = L"clink";
     }
 
-    WINTUN_ADAPTER* adapter = api.WintunOpenAdapter(friendly.c_str());
+    std::cerr << "[virtual_interface] call.begin WintunOpenAdapter name='" << narrow(friendly) << "'" << std::endl;
+    WINTUN_ADAPTER_HANDLE adapter = api.WintunOpenAdapter(friendly.c_str());
+    std::cerr << "[virtual_interface] call.end WintunOpenAdapter ptr=" << reinterpret_cast<void*>(adapter) << std::endl;
+
+    bool created_by_us = false;
     if (!adapter) {
-        adapter = api.WintunCreateAdapter(friendly.c_str(), L"clink", nullptr);
+        const DWORD open_err = GetLastError();
+        std::cerr << "[virtual_interface] WintunOpenAdapter failed name='" << narrow(friendly)
+                  << "' err=" << open_err << std::endl;
+
+        std::cerr << "[virtual_interface] call.begin WintunCreateAdapter name='" << narrow(friendly) << "' type='CLink'" << std::endl;
+        adapter = api.WintunCreateAdapter(friendly.c_str(), L"CLink", nullptr);
+        std::cerr << "[virtual_interface] call.end WintunCreateAdapter ptr=" << reinterpret_cast<void*>(adapter) << std::endl;
+
+        if (adapter) {
+            created_by_us = true;
+            std::cerr << "[virtual_interface] WintunCreateAdapter success name='" << narrow(friendly) << "'" << std::endl;
+        }
+    } else {
+        std::cerr << "[virtual_interface] WintunOpenAdapter success name='" << narrow(friendly) << "'" << std::endl;
     }
     if (!adapter) {
         DWORD err = GetLastError();
         return std::error_code(static_cast<int>(err ? err : ERROR_FILE_NOT_FOUND), std::system_category());
     }
 
-    WINTUN_SESSION* session = api.WintunStartSession(adapter, kDefaultRingCapacity);
+    std::cerr << "[virtual_interface] call.begin WintunStartSession capacity=" << kDefaultRingCapacity << std::endl;
+    WINTUN_SESSION_HANDLE session = api.WintunStartSession(adapter, kDefaultRingCapacity);
+    std::cerr << "[virtual_interface] call.end WintunStartSession ptr=" << reinterpret_cast<void*>(session) << std::endl;
     if (!session) {
         DWORD err = GetLastError();
+        std::cerr << "[virtual_interface] WintunStartSession failed err=" << err << std::endl;
+        std::cerr << "[virtual_interface] call.begin WintunCloseAdapter(after start fail)" << std::endl;
         api.WintunCloseAdapter(adapter);
+        std::cerr << "[virtual_interface] call.end WintunCloseAdapter(after start fail)" << std::endl;
         return std::error_code(static_cast<int>(err ? err : ERROR_NOT_ENOUGH_MEMORY), std::system_category());
     }
 
+    std::cerr << "[virtual_interface] call.begin WintunGetReadWaitEvent" << std::endl;
     HANDLE evt = api.WintunGetReadWaitEvent(session);
+    std::cerr << "[virtual_interface] call.end WintunGetReadWaitEvent handle=" << evt << std::endl;
     if (!evt) {
+        std::cerr << "[virtual_interface] call.begin WintunEndSession(after wait event fail)" << std::endl;
         api.WintunEndSession(session);
+        std::cerr << "[virtual_interface] call.end WintunEndSession(after wait event fail)" << std::endl;
+        std::cerr << "[virtual_interface] call.begin WintunCloseAdapter(after wait event fail)" << std::endl;
         api.WintunCloseAdapter(adapter);
+        std::cerr << "[virtual_interface] call.end WintunCloseAdapter(after wait event fail)" << std::endl;
         return std::make_error_code(std::errc::operation_not_permitted);
     }
 
     HANDLE duplicated = NULL;
+    std::cerr << "[virtual_interface] call.begin DuplicateHandle" << std::endl;
     if (!DuplicateHandle(GetCurrentProcess(), evt, GetCurrentProcess(), &duplicated, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
         DWORD err = GetLastError();
-        api.WintunEndSession(session);
-        api.WintunCloseAdapter(adapter);
-        return std::error_code(err, std::system_category());
+        std::cerr << "[virtual_interface] call.end DuplicateHandle failed err=" << err
+                  << " (fallback: continue without async wait handle)" << std::endl;
+        duplicated = NULL;
+    } else {
+        std::cerr << "[virtual_interface] call.end DuplicateHandle ok handle=" << duplicated << std::endl;
     }
 
+    // 注意：asio::windows::object_handle 在部分环境下构造/assign 存在兼容性问题，
+    // 先不绑定 wrapper，避免影响 VIF 主流程。
     wintun_wait_event_ = duplicated;
-    wintun_wait_handle_.assign(wintun_wait_event_);
+    if (wintun_wait_event_) {
+        std::cerr << "[virtual_interface] wintun wait event captured (wrapper binding skipped)" << std::endl;
+    }
+
     wintun_adapter_ = adapter;
     wintun_session_ = session;
+    wintun_adapter_created_by_us_ = created_by_us;
     return {};
 }
 
@@ -772,19 +1032,20 @@ void WindowsVirtualInterface::wintun_dispatch_read(std::shared_ptr<clink::core::
         return;
     }
 
-    if (!wintun_wait_handle_.is_open()) {
+    // 在某些 MinGW/Asio 组合下，object_handle 可能不可用。
+    // 对该场景使用轻量轮询退避，避免向上层抛 Unknown error 导致读取链路中断。
+    if (!wintun_wait_handle_ || !wintun_wait_handle_->is_open()) {
         callback(std::make_error_code(std::errc::operation_in_progress), 0);
         return;
     }
 
-    wintun_wait_handle_.async_wait(asio::bind_executor(
-        strand_, [this, buffer, callback](const std::error_code& ec) {
-            if (ec) {
-                callback(ec, 0);
-                return;
-            }
-            wintun_dispatch_read(buffer, callback);
-        }));
+    wintun_wait_handle_->async_wait([this, buffer, callback](const std::error_code& ec) {
+        if (ec) {
+            callback(ec, 0);
+            return;
+        }
+        wintun_dispatch_read(buffer, callback);
+    });
 }
 
 #else
@@ -884,8 +1145,11 @@ private:
 
 VirtualInterfacePtr create_virtual_interface(asio::io_context& io_context) {
 #ifdef _WIN32
+    std::cerr << "[virtual_interface] create_virtual_interface.begin" << std::endl;
     try {
-        return std::make_unique<WindowsVirtualInterface>(io_context);
+        auto vif = std::make_unique<WindowsVirtualInterface>(io_context);
+        std::cerr << "[virtual_interface] create_virtual_interface.ok" << std::endl;
+        return vif;
     } catch (const std::exception& e) {
         std::cerr << "[virtual_interface] create failed with exception: " << e.what() << std::endl;
         return {};

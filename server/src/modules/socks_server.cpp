@@ -1,5 +1,13 @@
 #include "server/include/clink/server/modules/socks_server.hpp"
 
+#include <algorithm>
+#include <cctype>
+
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 namespace clink::server::modules {
 
 SocksSession::SocksSession(asio::io_context& io_context, asio::ip::tcp::socket socket, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager)
@@ -14,77 +22,139 @@ void SocksSession::start() {
 }
 
 void SocksSession::do_handshake() {
-    // Read version (1 byte) + nmethods (1 byte) + methods (n bytes)
-    // Minimal: 1 + 1 + n >= 3
+    // RFC1928 greeting: VER, NMETHODS, METHODS...
     auto self(shared_from_this());
-    client_socket_.async_read_some(asio::buffer(client_buffer_),
-        [this, self](std::error_code ec, std::size_t length) {
-            if (!ec && length >= 2 && client_buffer_[0] == 0x05) {
-                // Ignore methods for now, assume No Auth
-                // Respond: VER=5, METHOD=0 (No Auth)
-                static const uint8_t response[] = {0x05, 0x00};
-                asio::async_write(client_socket_, asio::buffer(response),
-                    [this, self](std::error_code ec, std::size_t) {
-                        if (!ec) {
-                            do_request();
-                        } else {
-                            close();
-                        }
-                    });
-            } else {
+    asio::async_read(client_socket_, asio::buffer(client_buffer_.data(), 2),
+        [this, self](std::error_code ec, std::size_t) {
+            if (ec || client_buffer_[0] != 0x05) {
                 close();
+                return;
             }
+
+            const uint8_t nmethods = client_buffer_[1];
+            if (nmethods == 0) {
+                close();
+                return;
+            }
+
+            asio::async_read(client_socket_, asio::buffer(client_buffer_.data(), nmethods),
+                [this, self](std::error_code ec2, std::size_t) {
+                    if (ec2) {
+                        close();
+                        return;
+                    }
+
+                    // No-auth only
+                    static const uint8_t response[] = {0x05, 0x00};
+                    asio::async_write(client_socket_, asio::buffer(response),
+                        [this, self](std::error_code ec3, std::size_t) {
+                            if (!ec3) {
+                                do_request();
+                            } else {
+                                close();
+                            }
+                        });
+                });
         });
 }
 
 void SocksSession::do_request() {
-    // Read Request: VER=5, CMD=1(Connect), RSV=0, ATYP=1(IPv4)/3(Domain)/4(IPv6), DST.ADDR, DST.PORT
+    // RFC1928 request header: VER, CMD, RSV, ATYP
     auto self(shared_from_this());
-    client_socket_.async_read_some(asio::buffer(client_buffer_),
-        [this, self](std::error_code ec, std::size_t length) {
-            if (ec || length < 4 || client_buffer_[0] != 0x05 || client_buffer_[1] != 0x01) {
-                // Only support CONNECT
+    asio::async_read(client_socket_, asio::buffer(client_buffer_.data(), 4),
+        [this, self](std::error_code ec, std::size_t) {
+            if (ec || client_buffer_[0] != 0x05) {
                 close();
                 return;
             }
 
-            uint8_t atyp = client_buffer_[3];
-            std::string host;
-            uint16_t port;
-            size_t addr_len = 0;
-
-            if (atyp == 0x01) { // IPv4
-                if (length < 10) { close(); return; }
-                asio::ip::address_v4::bytes_type bytes;
-                std::copy_n(client_buffer_.begin() + 4, 4, bytes.begin());
-                host = asio::ip::address_v4(bytes).to_string();
-                addr_len = 4;
-            } else if (atyp == 0x03) { // Domain
-                uint8_t domain_len = client_buffer_[4];
-                if (length < static_cast<size_t>(5 + domain_len + 2)) { close(); return; }
-                host = std::string(reinterpret_cast<char*>(&client_buffer_[5]), domain_len);
-                addr_len = 1 + domain_len;
-            } else if (atyp == 0x04) { // IPv6
-                if (length < 22) { close(); return; }
-                asio::ip::address_v6::bytes_type bytes;
-                std::copy_n(client_buffer_.begin() + 4, 16, bytes.begin());
-                host = asio::ip::address_v6(bytes).to_string();
-                addr_len = 16;
-            } else {
-                close();
+            if (client_buffer_[1] != 0x01) {
+                static const uint8_t response[] = {0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+                asio::async_write(client_socket_, asio::buffer(response),
+                    [this, self](std::error_code, std::size_t) { close(); });
                 return;
             }
 
-            port = (client_buffer_[4 + addr_len] << 8) | client_buffer_[4 + addr_len + 1];
-            remote_host_ = host;
-            remote_port_ = port;
+            const uint8_t atyp = client_buffer_[3];
+            if (atyp == 0x01) { // IPv4 + port(2)
+                asio::async_read(client_socket_, asio::buffer(client_buffer_.data(), 6),
+                    [this, self](std::error_code ec2, std::size_t) {
+                        if (ec2) {
+                            close();
+                            return;
+                        }
 
-            logger_->info("SOCKS Connect request to " + host + ":" + std::to_string(port));
+                        asio::ip::address_v4::bytes_type bytes{};
+                        std::copy_n(client_buffer_.begin(), 4, bytes.begin());
+                        const std::string host = asio::ip::address_v4(bytes).to_string();
+                        const uint16_t port = static_cast<uint16_t>((client_buffer_[4] << 8) | client_buffer_[5]);
+                        remote_host_ = host;
+                        remote_port_ = port;
+                        if (logger_) {
+                            logger_->info("SOCKS Connect request to " + host + ":" + std::to_string(port));
+                        }
+                        do_connect(host, std::to_string(port));
+                    });
+                return;
+            }
 
-            // Reply Success (0x00) immediately, assuming we can connect
-            // Wait, we should connect first?
-            // Usually connect first, then reply.
-            do_connect(host, std::to_string(port));
+            if (atyp == 0x04) { // IPv6 + port(2)
+                asio::async_read(client_socket_, asio::buffer(client_buffer_.data(), 18),
+                    [this, self](std::error_code ec2, std::size_t) {
+                        if (ec2) {
+                            close();
+                            return;
+                        }
+
+                        asio::ip::address_v6::bytes_type bytes{};
+                        std::copy_n(client_buffer_.begin(), 16, bytes.begin());
+                        const std::string host = asio::ip::address_v6(bytes).to_string();
+                        const uint16_t port = static_cast<uint16_t>((client_buffer_[16] << 8) | client_buffer_[17]);
+                        remote_host_ = host;
+                        remote_port_ = port;
+                        if (logger_) {
+                            logger_->info("SOCKS Connect request to " + host + ":" + std::to_string(port));
+                        }
+                        do_connect(host, std::to_string(port));
+                    });
+                return;
+            }
+
+            if (atyp == 0x03) { // DOMAIN
+                asio::async_read(client_socket_, asio::buffer(client_buffer_.data(), 1),
+                    [this, self](std::error_code ec2, std::size_t) {
+                        if (ec2) {
+                            close();
+                            return;
+                        }
+
+                        const uint8_t domain_len = client_buffer_[0];
+                        if (domain_len == 0 || domain_len > 253) {
+                            close();
+                            return;
+                        }
+
+                        asio::async_read(client_socket_, asio::buffer(client_buffer_.data(), static_cast<size_t>(domain_len) + 2),
+                            [this, self, domain_len](std::error_code ec3, std::size_t) {
+                                if (ec3) {
+                                    close();
+                                    return;
+                                }
+
+                                const std::string host(reinterpret_cast<char*>(client_buffer_.data()), domain_len);
+                                const uint16_t port = static_cast<uint16_t>((client_buffer_[domain_len] << 8) | client_buffer_[domain_len + 1]);
+                                remote_host_ = host;
+                                remote_port_ = port;
+                                if (logger_) {
+                                    logger_->info("SOCKS Connect request to " + host + ":" + std::to_string(port));
+                                }
+                                do_connect(host, std::to_string(port));
+                            });
+                    });
+                return;
+            }
+
+            close();
         });
 }
 
@@ -93,50 +163,57 @@ void SocksSession::do_connect(std::string host, std::string port) {
     auto resolver = std::make_shared<asio::ip::tcp::resolver>(io_context_);
     resolver->async_resolve(host, port,
         [this, self, resolver](std::error_code ec, asio::ip::tcp::resolver::results_type results) {
-            if (!ec) {
-                // If SessionManager is available and VIP is set, bind to it.
-                if (session_manager_) {
-                    std::string vip = session_manager_->get_virtual_interface_address();
-                    if (!vip.empty()) {
+            if (ec || results.empty()) {
+                static const uint8_t response[] = {0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+                asio::async_write(client_socket_, asio::buffer(response),
+                    [this, self](std::error_code, std::size_t) { close(); });
+                return;
+            }
+
+            // If SessionManager is available and VIP is set, bind to it.
+            if (session_manager_) {
+                std::string vip = session_manager_->get_virtual_interface_address();
+                if (!vip.empty()) {
+                    asio::error_code addr_ec;
+                    auto bind_addr = asio::ip::make_address(vip, addr_ec);
+                    if (!addr_ec) {
+                        asio::error_code open_ec;
                         asio::error_code bind_ec;
-                        remote_socket_.open(asio::ip::tcp::v4(), bind_ec);
-                        if (!bind_ec) {
-                            remote_socket_.bind(asio::ip::tcp::endpoint(asio::ip::make_address(vip), 0), bind_ec);
+                        remote_socket_.open(results.begin()->endpoint().protocol(), open_ec);
+                        if (!open_ec) {
+                            remote_socket_.bind(asio::ip::tcp::endpoint(bind_addr, 0), bind_ec);
                             if (bind_ec) {
-                                logger_->warn("Failed to bind to VIP " + vip + ": " + bind_ec.message());
+                                if (logger_) {
+                                    logger_->warn("Failed to bind to VIP " + vip + ": " + bind_ec.message());
+                                }
+                                asio::error_code close_ec;
+                                remote_socket_.close(close_ec);
                             }
                         }
+                    } else if (logger_) {
+                        logger_->warn("Invalid VIP address " + vip + ": " + addr_ec.message());
                     }
                 }
-
-                asio::async_connect(remote_socket_, results,
-                    [this, self](std::error_code ec, asio::ip::tcp::endpoint) {
-                        if (!ec) {
-                            // Reply Success
-                            // VER=5, REP=0, RSV=0, ATYP=1, BND.ADDR(0), BND.PORT(0)
-                            static const uint8_t response[] = {
-                                0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0
-                            };
-                            asio::async_write(client_socket_, asio::buffer(response),
-                                [this, self](std::error_code ec, std::size_t) {
-                                    if (!ec) {
-                                        do_bridge();
-                                    } else {
-                                        close();
-                                    }
-                                });
-                        } else {
-                            // Reply Failure (0x04 Host Unreachable)
-                            static const uint8_t response[] = {
-                                0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0
-                            };
-                            asio::async_write(client_socket_, asio::buffer(response),
-                                [this, self](std::error_code, std::size_t) { close(); });
-                        }
-                    });
-            } else {
-                close();
             }
+
+            asio::async_connect(remote_socket_, results,
+                [this, self](std::error_code ec2, asio::ip::tcp::endpoint) {
+                    if (!ec2) {
+                        static const uint8_t response[] = {0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+                        asio::async_write(client_socket_, asio::buffer(response),
+                            [this, self](std::error_code ec3, std::size_t) {
+                                if (!ec3) {
+                                    do_bridge();
+                                } else {
+                                    close();
+                                }
+                            });
+                    } else {
+                        static const uint8_t response[] = {0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+                        asio::async_write(client_socket_, asio::buffer(response),
+                            [this, self](std::error_code, std::size_t) { close(); });
+                    }
+                });
         });
 }
 
@@ -185,56 +262,416 @@ void SocksSession::do_read_remote() {
 
 void SocksSession::close() {
     asio::error_code ignored_ec;
-    client_socket_.close(ignored_ec);
-    remote_socket_.close(ignored_ec);
+    if (client_socket_.is_open()) {
+        client_socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ignored_ec);
+        client_socket_.close(ignored_ec);
+    }
+    if (remote_socket_.is_open()) {
+        remote_socket_.shutdown(asio::ip::tcp::socket::shutdown_both, ignored_ec);
+        remote_socket_.close(ignored_ec);
+    }
 }
 
 // SocksServer Implementation
 
 SocksServer::SocksServer(asio::io_context& io_context, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager)
-    : io_context_(io_context), acceptor_(io_context), logger_(std::move(logger)), session_manager_(std::move(session_manager)) {}
+    : io_context_(io_context), logger_(std::move(logger)), session_manager_(std::move(session_manager)) {}
 
 SocksServer::~SocksServer() {
     stop();
 }
 
-bool SocksServer::start(uint16_t port) {
+bool SocksServer::start(uint16_t port, const std::string& backend) {
     try {
+        if (logger_) {
+            logger_->info("[socks] stage=start.begin requested_port backend", port, backend);
+        }
+
+        if ((acceptor_ && acceptor_->is_open())
+#ifdef _WIN32
+            || winsock_running_.load()
+#endif
+        ) {
+            if (logger_) {
+                logger_->warn("[socks] stage=start.skip already_running bound_port", port_);
+            }
+            return true;
+        }
+
+        auto cleanup_on_failure = [this]() {
+            close_acceptor();
+            port_ = 0;
+        };
+
+#if defined(_WIN32)
+        WSADATA wsa_data{};
+        const int wsa_rc = WSAStartup(MAKEWORD(2, 2), &wsa_data);
+        if (logger_) {
+            logger_->info("[socks] stage=winsock_probe.rc={}", wsa_rc);
+        }
+        if (wsa_rc == 0) {
+            SOCKET probe = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (probe == INVALID_SOCKET) {
+                if (logger_) {
+                    logger_->warn("[socks] stage=socket_probe.failed wsa={}", WSAGetLastError());
+                }
+            } else {
+                if (logger_) {
+                    logger_->info("[socks] stage=socket_probe.ok");
+                }
+                closesocket(probe);
+            }
+            WSACleanup();
+        }
+#endif
+
         asio::ip::tcp::endpoint endpoint(asio::ip::tcp::v4(), port);
-        acceptor_.open(endpoint.protocol());
-        acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true));
-        acceptor_.bind(endpoint);
-        acceptor_.listen();
-        port_ = acceptor_.local_endpoint().port();
-        
-        logger_->info("SOCKS5 Server started on port " + std::to_string(port_));
-        
+
+        std::string backend_mode = backend;
+        std::transform(backend_mode.begin(), backend_mode.end(), backend_mode.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+#ifdef _WIN32
+        const bool force_winsock = (backend_mode == "winsock");
+        const bool force_asio = (backend_mode == "asio");
+        const bool auto_backend = (backend_mode.empty() || backend_mode == "auto");
+        if (force_winsock) {
+            return start_winsock_backend(port);
+        }
+
+        // On Windows, Asio constructor path has known toolchain-specific instability in some environments.
+        // Prefer WinSock first in auto mode to maximize availability, then fall back to Asio only if needed.
+        if (auto_backend) {
+            if (start_winsock_backend(port)) {
+                return true;
+            }
+            if (logger_) {
+                logger_->warn("[socks] stage=fallback.asio.begin reason=winsock_start_failed");
+            }
+        }
+
+        (void)force_asio;
+#else
+        const bool auto_backend = (backend_mode.empty() || backend_mode == "auto");
+        if (backend_mode == "winsock") {
+            if (logger_) {
+                logger_->warn("[socks] stage=backend.override.unsupported backend=winsock platform=non_windows fallback=asio");
+            }
+        } else if (!auto_backend && backend_mode != "asio") {
+            if (logger_) {
+                logger_->warn("[socks] stage=backend.unknown value platform=non_windows fallback=asio", backend_mode);
+            }
+        }
+#endif
+
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.alloc.begin");
+        }
+        if (!acceptor_) {
+            acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(io_context_);
+        }
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.alloc.ok ptr={}", static_cast<const void*>(acceptor_.get()));
+        }
+
+        asio::error_code ec;
+
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.open.begin");
+        }
+        acceptor_->open(endpoint.protocol(), ec);
+        if (ec) {
+            if (logger_) {
+                logger_->error("[socks] stage=acceptor.open.failed error", ec.message());
+            }
+            cleanup_on_failure();
+#ifdef _WIN32
+            if (auto_backend) {
+                if (logger_) {
+                    logger_->warn("[socks] stage=fallback.winsock.begin reason=acceptor_open_failed");
+                }
+                return start_winsock_backend(port);
+            }
+#endif
+            return false;
+        }
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.open.ok");
+        }
+
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.set_reuse.begin");
+        }
+        acceptor_->set_option(asio::ip::tcp::acceptor::reuse_address(true), ec);
+        if (ec) {
+            if (logger_) {
+                logger_->warn("[socks] stage=acceptor.set_reuse.failed error={}", ec.message());
+            }
+            ec.clear();
+        } else if (logger_) {
+            logger_->info("[socks] stage=acceptor.set_reuse.ok");
+        }
+
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.bind.begin endpoint=0.0.0.0:{}", port);
+        }
+        acceptor_->bind(endpoint, ec);
+        if (ec) {
+            if (logger_) {
+                logger_->error("[socks] stage=acceptor.bind.failed error", ec.message());
+            }
+            cleanup_on_failure();
+#ifdef _WIN32
+            if (auto_backend) {
+                if (logger_) {
+                    logger_->warn("[socks] stage=fallback.winsock.begin reason=acceptor_bind_failed");
+                }
+                return start_winsock_backend(port);
+            }
+#endif
+            return false;
+        }
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.bind.ok");
+        }
+
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.listen.begin");
+        }
+        acceptor_->listen(asio::socket_base::max_listen_connections, ec);
+        if (ec) {
+            if (logger_) {
+                logger_->error("[socks] stage=acceptor.listen.failed error", ec.message());
+            }
+            cleanup_on_failure();
+#ifdef _WIN32
+            if (auto_backend) {
+                if (logger_) {
+                    logger_->warn("[socks] stage=fallback.winsock.begin reason=acceptor_listen_failed");
+                }
+                return start_winsock_backend(port);
+            }
+#endif
+            return false;
+        }
+        if (logger_) {
+            logger_->info("[socks] stage=acceptor.listen.ok");
+        }
+
+        port_ = acceptor_->local_endpoint(ec).port();
+        if (ec) {
+            if (logger_) {
+                logger_->error("[socks] stage=acceptor.local_endpoint.failed error={}", ec.message());
+            }
+            cleanup_on_failure();
+            return false;
+        }
+
+        if (logger_) {
+            logger_->info("[socks] stage=start.ok bound_port backend", port_, "asio");
+        }
+        backend_ = Backend::Asio;
         do_accept();
         return true;
-    } catch (std::exception& e) {
-        logger_->error("Failed to start SOCKS5 Server: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        if (logger_) {
+            logger_->error("[socks] stage=start.exception error={}", e.what());
+        }
+        close_acceptor();
+        port_ = 0;
+        return false;
+    } catch (...) {
+        if (logger_) {
+            logger_->error("[socks] stage=start.exception error=unknown");
+        }
+        close_acceptor();
+        port_ = 0;
         return false;
     }
 }
 
 void SocksServer::stop() {
-    acceptor_.close();
+    close_acceptor();
+#ifdef _WIN32
+    stop_winsock_backend();
+#endif
+    backend_ = Backend::None;
+    port_ = 0;
+}
+
+void SocksServer::close_acceptor() {
+    if (!acceptor_) {
+        return;
+    }
+
+    asio::error_code ec;
+    acceptor_->cancel(ec);
+    acceptor_->close(ec);
+    acceptor_.reset();
 }
 
 uint16_t SocksServer::port() const {
     return port_;
 }
 
-void SocksServer::do_accept() {
-    acceptor_.async_accept(
-        [this](std::error_code ec, asio::ip::tcp::socket socket) {
-            if (!ec) {
-                std::make_shared<SocksSession>(io_context_, std::move(socket), logger_, session_manager_)->start();
-            } else {
-                logger_->warn("Socks accept failed: " + ec.message());
+#ifdef _WIN32
+bool SocksServer::start_winsock_backend(uint16_t port) {
+    WSADATA wsa_data{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        if (logger_) {
+            logger_->error("[socks] stage=fallback.winsock.wsa_startup.failed");
+        }
+        return false;
+    }
+
+    SOCKET listen_sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listen_sock == INVALID_SOCKET) {
+        if (logger_) {
+            logger_->error("[socks] stage=fallback.winsock.socket.failed", WSAGetLastError());
+        }
+        WSACleanup();
+        return false;
+    }
+
+    BOOL opt = TRUE;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (::bind(listen_sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+        if (logger_) {
+            logger_->error("[socks] stage=fallback.winsock.bind.failed", WSAGetLastError());
+        }
+        closesocket(listen_sock);
+        WSACleanup();
+        return false;
+    }
+
+    if (::listen(listen_sock, SOMAXCONN) != 0) {
+        if (logger_) {
+            logger_->error("[socks] stage=fallback.winsock.listen.failed", WSAGetLastError());
+        }
+        closesocket(listen_sock);
+        WSACleanup();
+        return false;
+    }
+
+    sockaddr_in local{};
+    int local_len = sizeof(local);
+    if (getsockname(listen_sock, reinterpret_cast<sockaddr*>(&local), &local_len) == 0) {
+        port_ = ntohs(local.sin_port);
+    } else {
+        port_ = port;
+    }
+
+    winsock_listen_socket_ = static_cast<uintptr_t>(listen_sock);
+    winsock_running_.store(true);
+    backend_ = Backend::WinSock;
+
+    winsock_accept_thread_ = std::thread([this]() { winsock_accept_loop(); });
+
+    if (logger_) {
+        logger_->warn("[socks] stage=start.ok bound_port backend", port_, "winsock");
+    }
+    return true;
+}
+
+void SocksServer::stop_winsock_backend() {
+    if (!winsock_running_.exchange(false)) {
+        return;
+    }
+
+    const SOCKET s = static_cast<SOCKET>(winsock_listen_socket_);
+    if (s != 0 && s != INVALID_SOCKET) {
+        shutdown(s, SD_BOTH);
+        closesocket(s);
+    }
+    winsock_listen_socket_ = 0;
+
+    if (winsock_accept_thread_.joinable()) {
+        winsock_accept_thread_.join();
+    }
+
+    WSACleanup();
+}
+
+void SocksServer::winsock_accept_loop() {
+    const SOCKET s = static_cast<SOCKET>(winsock_listen_socket_);
+    while (winsock_running_.load()) {
+        sockaddr_storage peer_addr{};
+        int peer_len = sizeof(peer_addr);
+        SOCKET client = ::accept(s, reinterpret_cast<sockaddr*>(&peer_addr), &peer_len);
+        if (client == INVALID_SOCKET) {
+            const int wsa_err = WSAGetLastError();
+            if (!winsock_running_.load()) {
+                break;
             }
-            if (acceptor_.is_open()) {
-                do_accept();
+            if (logger_) {
+                logger_->warn("[socks] stage=fallback.winsock.accept.failed", wsa_err);
+            }
+            continue;
+        }
+
+        if (logger_) {
+            char host[NI_MAXHOST] = {0};
+            char serv[NI_MAXSERV] = {0};
+            if (getnameinfo(reinterpret_cast<sockaddr*>(&peer_addr), peer_len,
+                            host, sizeof(host), serv, sizeof(serv),
+                            NI_NUMERICHOST | NI_NUMERICSERV) == 0) {
+                logger_->debug("[socks] stage=fallback.winsock.accept.ok remote", std::string(host) + ":" + std::string(serv));
+            } else {
+                logger_->debug("[socks] stage=fallback.winsock.accept.ok remote=unknown");
+            }
+        }
+
+        asio::post(io_context_, [this, client]() {
+            asio::error_code ec;
+            asio::ip::tcp::socket socket(io_context_);
+            socket.assign(asio::ip::tcp::v4(), client, ec);
+            if (ec) {
+                closesocket(client);
+                if (logger_) {
+                    logger_->warn("[socks] stage=fallback.winsock.assign.failed", ec.message());
+                }
+                return;
+            }
+            std::make_shared<SocksSession>(io_context_, std::move(socket), logger_, session_manager_)->start();
+        });
+    }
+}
+#endif
+
+void SocksServer::do_accept() {
+    if (!acceptor_ || !acceptor_->is_open()) {
+        return;
+    }
+
+    auto self = shared_from_this();
+    if (logger_) {
+        logger_->debug("[socks] stage=accept.wait");
+    }
+
+    acceptor_->async_accept(
+        [self](std::error_code ec, asio::ip::tcp::socket socket) {
+            if (!ec) {
+                if (self->logger_) {
+                    asio::error_code rep_ec;
+                    const auto rep = socket.remote_endpoint(rep_ec);
+                    if (!rep_ec) {
+                        self->logger_->debug("[socks] stage=accept.ok remote={}", rep.address().to_string());
+                    } else {
+                        self->logger_->debug("[socks] stage=accept.ok remote=unknown({})", rep_ec.message());
+                    }
+                }
+                std::make_shared<SocksSession>(self->io_context_, std::move(socket), self->logger_, self->session_manager_)->start();
+            } else if (self->logger_) {
+                self->logger_->warn("[socks] stage=accept.failed error={}", ec.message());
+            }
+
+            if (self->acceptor_ && self->acceptor_->is_open()) {
+                self->do_accept();
             }
         });
 }

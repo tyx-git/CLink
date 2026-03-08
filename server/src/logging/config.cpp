@@ -251,6 +251,18 @@ void LogConfig::add_default_sinks() {
     console_sink.enabled = true;
     console_sink.level = level;
     sinks.push_back(console_sink);
+
+    // Add default file sink so server logs are always persisted
+    SinkConfig file_sink;
+    file_sink.type = SinkType::File;
+    file_sink.enabled = true;
+    file_sink.level = level;
+#ifdef _WIN32
+    file_sink.path = "logs/clink-win.log";
+#else
+    file_sink.path = "logs/clink-linux.log";
+#endif
+    sinks.push_back(file_sink);
 }
 
 }  // namespace clink::core::logging

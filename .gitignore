@@ -18,18 +18,13 @@ external/
 logs/
 *.log
 AGENTS.md
-todo*.md
-todo.md
 Out/
 test/
 config/certs/
 scripts/
-/docs/
-report.md
+docs/
+
 
 # Misc
 .DS_Store
 Thumbs.db
-
-give.txt
-require.txt

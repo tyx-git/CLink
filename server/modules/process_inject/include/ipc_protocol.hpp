@@ -11,7 +11,8 @@ namespace clink::hook::ipc {
         Connect = 1,
         Disconnect = 2,
         DataSend = 3,
-        DataRecv = 4
+        DataRecv = 4,
+        Log = 5
     };
 
     #pragma pack(push, 1)

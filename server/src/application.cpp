@@ -12,17 +12,59 @@
 #include "server/include/clink/server/modules/heartbeat.hpp"
 #include "server/include/clink/server/modules/metrics.hpp"
 #include "server/include/clink/server/modules/process_manager.hpp"
+#include <cstdint>
 
 #include <thread>
 #include <fstream>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
+#include <codecvt>
+#include <locale>
 
 #ifdef _WIN32
 #include <winsock2.h>
 #endif
 
 namespace clink::core {
+
+namespace {
+#ifdef _WIN32
+std::string to_utf8_safe(std::string input) {
+    if (input.empty()) {
+        return input;
+    }
+
+    // Fast path: already valid UTF-8
+    if (nlohmann::json::accept("\"" + input + "\"")) {
+        return input;
+    }
+
+    const int wide_len = MultiByteToWideChar(CP_ACP, 0, input.c_str(), -1, nullptr, 0);
+    if (wide_len <= 0) {
+        return "windows_error_non_utf8";
+    }
+
+    std::wstring wide(static_cast<size_t>(wide_len), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, input.c_str(), -1, wide.data(), wide_len);
+
+    const int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8_len <= 0) {
+        return "windows_error_non_utf8";
+    }
+
+    std::string out(static_cast<size_t>(utf8_len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, out.data(), utf8_len, nullptr, nullptr);
+    if (!out.empty() && out.back() == '\0') {
+        out.pop_back();
+    }
+    return out;
+}
+#else
+std::string to_utf8_safe(std::string input) {
+    return input;
+}
+#endif
+} // namespace
 
 Application::Application(ApplicationOptions options)
     : io_work_(std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(io_context_.get_executor())),
@@ -98,16 +140,39 @@ void Application::initialize() {
             logger_->info(std::string("[init] stage=process_manager.enabled=") + (enable_process_manager ? "true" : "false"));
 
             if (enable_process_manager) {
-                logger_->info("[init] stage=process_manager.create.begin");
-                auto pm = std::make_shared<clink::server::modules::ProcessManager>(io_context_, logger_, session_manager_);
-                logger_->info("[init] stage=process_manager.create.ok");
+                try {
+                    logger_->info("[init] stage=process_manager.create.begin");
+                    auto pm = std::make_shared<clink::server::modules::ProcessManager>(io_context_, logger_, session_manager_);
+                    logger_->info("[init] stage=process_manager.create.ok");
 
-                logger_->info("[init] stage=process_manager.start.begin");
-                if (pm->start(configuration_)) {
-                    process_manager_ = pm;
-                    logger_->info("[init] stage=process_manager.start.ok");
-                } else {
-                    logger_->warn("[init] stage=process_manager.start.failed_return_false");
+                    logger_->info("[init] stage=process_manager.start.begin");
+                    const auto pm_start_t0 = std::chrono::steady_clock::now();
+                    const bool pm_started = pm->start(configuration_);
+                    const auto pm_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - pm_start_t0).count();
+
+                    logger_->info("[init] stage=process_manager.start.elapsed_ms", pm_start_ms);
+                    if (pm_start_ms > 3000) {
+                        logger_->warn("[init] stage=process_manager.start.slow elapsed_ms", pm_start_ms);
+                    }
+
+                    if (pm_started) {
+                        process_manager_ = pm;
+                        const auto pm_state = pm->start_state();
+                        if (pm_state == clink::server::modules::ProcessManager::StartState::Ready) {
+                            logger_->info("[init] stage=process_manager.start.ok mode=ready");
+                        } else if (pm_state == clink::server::modules::ProcessManager::StartState::Degraded) {
+                            logger_->warn("[init] stage=process_manager.start.ok mode=degraded socks_available=false");
+                        } else {
+                            logger_->warn("[init] stage=process_manager.start.ok mode=unknown");
+                        }
+                    } else {
+                        logger_->warn("[init] stage=process_manager.start.failed_return_false");
+                    }
+                } catch (const std::exception& ex) {
+                    logger_->error(std::string("[init] stage=process_manager.start.exception: ") + ex.what());
+                } catch (...) {
+                    logger_->error("[init] stage=process_manager.start.exception: unknown");
                 }
             } else {
                 logger_->warn("[init] stage=process_manager.skip.disabled");
@@ -177,6 +242,13 @@ void Application::apply_configuration() {
 
             impl->set_virtual_interface_enabled(vif_enabled);
             logger_->info(std::string("[apply] stage=session_manager.vif.enabled=") + (vif_enabled ? "true" : "false"));
+
+            int idle_timeout_sec = configuration_.get_int("network.session_idle_timeout_sec", 0);
+            if (idle_timeout_sec < 0) {
+                idle_timeout_sec = 0;
+            }
+            impl->set_session_idle_timeout(std::chrono::seconds(idle_timeout_sec));
+            logger_->info("[apply] stage=session_manager.idle_timeout_sec", idle_timeout_sec);
         }
 
         // 2. 应用全局带宽限制
@@ -604,6 +676,57 @@ std::string Application::get_session_status() const {
     if (!last_connect_message_.empty()) {
         result += ", \"connect_message\": \"" + last_connect_message_ + "\"";
     }
+
+    {
+        bool pm_enabled = false;
+        bool pm_socks_available = false;
+        std::string pm_state = "not_started";
+        std::string pm_reason = "not_started";
+
+        if (process_manager_) {
+            pm_enabled = true;
+            auto pm = std::static_pointer_cast<clink::server::modules::ProcessManager>(process_manager_);
+            if (pm) {
+                pm_socks_available = pm->socks_available();
+                pm_reason = pm->start_reason();
+                const auto s = pm->start_state();
+                if (s == clink::server::modules::ProcessManager::StartState::Ready) {
+                    pm_state = "ready";
+                } else if (s == clink::server::modules::ProcessManager::StartState::Degraded) {
+                    pm_state = "degraded";
+                } else {
+                    pm_state = "failed";
+                }
+            } else {
+                pm_state = "invalid_ref";
+            }
+        }
+
+        std::string health = "green";
+        if (!pm_enabled || pm_state == "failed") {
+            health = "red";
+        } else if (pm_state == "degraded") {
+            health = "yellow";
+        }
+
+        result += ", \"health\": \"" + health + "\"";
+        result += ", \"process_manager\": {";
+        std::string pm_socks_backend = "none";
+        if (process_manager_) {
+            auto pm = std::static_pointer_cast<clink::server::modules::ProcessManager>(process_manager_);
+            if (pm) {
+                pm_socks_backend = pm->socks_backend();
+            }
+        }
+
+        result += "\"enabled\": " + std::string(pm_enabled ? "true" : "false") + ", ";
+        result += "\"state\": \"" + pm_state + "\", ";
+        result += "\"reason\": \"" + pm_reason + "\", ";
+        result += "\"socks_backend\": \"" + pm_socks_backend + "\", ";
+        result += "\"socks_available\": " + std::string(pm_socks_available ? "true" : "false");
+        result += "}";
+    }
+
     result += ", ";
 
     if (session_manager_) {
@@ -733,6 +856,7 @@ std::string Application::connect_session(const std::string& endpoint_override) {
 
     auto make_result = [this](bool accepted, std::string status, std::string reason,
                                std::string message = "", std::string endpoint = "", std::string session_id = "") {
+        message = to_utf8_safe(std::move(message));
         last_connect_phase_ = status;
         last_connect_reason_ = reason;
         last_connect_message_ = message;
@@ -908,11 +1032,12 @@ std::string Application::connect_session(const std::string& endpoint_override) {
     logger_->info("[connect.stage] transport.start.begin endpoint=" + endpoint);
     auto err = adapter->start(endpoint);
     if (err) {
-        logger_->error("[app] failed to start transport to " + endpoint + ": " + err.message());
-        span->set_attribute("error", err.message());
+        const std::string err_message = to_utf8_safe(err.message());
+        logger_->error("[app] failed to start transport to " + endpoint + ": " + err_message);
+        span->set_attribute("error", err_message);
         session_state_ = SessionState::Disconnected;
         logger_->info("connect.final status=failed reason=transport_start_failed endpoint=" + endpoint);
-        return make_result(false, "failed", "transport_start_failed", err.message(), endpoint);
+        return make_result(false, "failed", "transport_start_failed", err_message, endpoint);
     }
     span->add_event("transport_connected");
     logger_->info("[connect.stage] transport.start.ok endpoint=" + endpoint);

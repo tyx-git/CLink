@@ -39,9 +39,11 @@ public:
 
     using PacketHandler = std::function<void(std::shared_ptr<IPCConnection>, const ipc::PacketHeader&, const std::vector<char>&)>;
     using DisconnectHandler = std::function<void(std::shared_ptr<IPCConnection>)>;
-    
+    using LogSink = std::function<void(bool is_error, const std::string& message)>;
+
     void set_packet_handler(PacketHandler handler);
     void set_disconnect_handler(DisconnectHandler handler);
+    void set_log_sink(LogSink sink);
     void set_socks_port(uint16_t port);
     void start();
     void stop();
@@ -52,8 +54,9 @@ private:
     asio::io_context& io_context_;
     PacketHandler packet_handler_;
     DisconnectHandler disconnect_handler_;
+    LogSink log_sink_;
     uint16_t socks_port_ = 0;
-    
+
     std::shared_ptr<NamedPipeAcceptor> acceptor_;
 };
 

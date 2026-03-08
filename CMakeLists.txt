@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CLINK VERSION 1.1.0 LANGUAGES CXX)
+project(CLINK VERSION 1.2.1 LANGUAGES CXX)
 
 option(CLINK_ENABLE_TESTS "Enable tests" ON)
 
@@ -111,38 +111,67 @@ else()
         VERSION 3.11.3
     )
 endif()
-# Add MinHook for process injection (Windows only)
-if(WIN32)
-    CPMAddPackage(
-        NAME MinHook
-        GITHUB_REPOSITORY TsudaKageyu/minhook
-        VERSION 1.3.4
-        OPTIONS
-            "MH_BUILD_SHARED OFF"
-            "MH_BUILD_TESTS OFF"
-    )
-    if(MinHook_ADDED)
+option(CLINK_BUILD_CLIENT_HOOK "Build Windows client hook module" ON)
+
+# Add MinHook for client hook (Windows only, optional/offline-friendly)
+if(WIN32 AND CLINK_BUILD_CLIENT_HOOK)
+    set(_CLINK_MINHOOK_READY OFF)
+
+    # Prefer local MinHook checkout to avoid network dependency
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/CMakeLists.txt")
+        message(STATUS "Using local MinHook from external/minhook")
+        add_subdirectory(external/minhook)
+        set(_CLINK_MINHOOK_READY ON)
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/include/MinHook.h")
+        message(STATUS "Using local MinHook source layout from external/minhook")
+        add_library(minhook STATIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/src/buffer.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/src/hook.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/src/trampoline.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/src/hde/hde32.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/src/hde/hde64.c"
+        )
+        target_include_directories(minhook PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external/minhook/include")
+        set(_CLINK_MINHOOK_READY ON)
+    else()
+        message(STATUS "Local MinHook not found, trying CPM download")
+        CPMAddPackage(
+            NAME MinHook
+            GITHUB_REPOSITORY TsudaKageyu/minhook
+            VERSION 1.3.4
+            OPTIONS
+                "MH_BUILD_SHARED OFF"
+                "MH_BUILD_TESTS OFF"
+        )
+
         if(TARGET MinHook)
             add_library(minhook ALIAS MinHook)
+            set(_CLINK_MINHOOK_READY ON)
         elseif(TARGET minhook)
-             # Do nothing, it's already minhook
-        else()
-             # Fallback: Build from source if target not defined
-             add_library(minhook STATIC
-                 "${MinHook_SOURCE_DIR}/src/buffer.c"
-                 "${MinHook_SOURCE_DIR}/src/hook.c"
-                 "${MinHook_SOURCE_DIR}/src/trampoline.c"
-                 "${MinHook_SOURCE_DIR}/src/hde/hde32.c"
-                 "${MinHook_SOURCE_DIR}/src/hde/hde64.c"
-             )
-             target_include_directories(minhook PUBLIC "${MinHook_SOURCE_DIR}/include")
+            set(_CLINK_MINHOOK_READY ON)
+        elseif(MinHook_ADDED)
+            # Fallback: Build from source if package fetched but no target exported
+            add_library(minhook STATIC
+                "${MinHook_SOURCE_DIR}/src/buffer.c"
+                "${MinHook_SOURCE_DIR}/src/hook.c"
+                "${MinHook_SOURCE_DIR}/src/trampoline.c"
+                "${MinHook_SOURCE_DIR}/src/hde/hde32.c"
+                "${MinHook_SOURCE_DIR}/src/hde/hde64.c"
+            )
+            target_include_directories(minhook PUBLIC "${MinHook_SOURCE_DIR}/include")
+            set(_CLINK_MINHOOK_READY ON)
         endif()
+    endif()
+
+    if(NOT _CLINK_MINHOOK_READY)
+        message(WARNING "MinHook unavailable, disabling CLINK_BUILD_CLIENT_HOOK. Server components will still build.")
+        set(CLINK_BUILD_CLIENT_HOOK OFF)
     endif()
 endif()
 
 # Process Injection Module
-if(WIN32)
-    add_subdirectory(server/modules/process_inject)
+add_subdirectory(server/modules/process_inject)
+if(WIN32 AND CLINK_BUILD_CLIENT_HOOK)
     add_subdirectory(client/modules/process_inject)
 endif()
 
