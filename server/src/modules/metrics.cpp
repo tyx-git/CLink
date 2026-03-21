@@ -1,4 +1,5 @@
 #include "server/include/clink/server/modules/metrics.hpp"
+#include "server/include/clink/core/network/packet.hpp"
 #include <iostream>
 
 namespace clink::modules {
@@ -63,6 +64,27 @@ void MetricsModule::collect_loop() {
                                " sent=" + std::to_string(sess.bytes_sent) + 
                                " recv=" + std::to_string(sess.bytes_received));
             }
+
+            const auto& zc = core::network::packet_copy_stats();
+            const uint64_t raw_packets = zc.packets_deserialize_raw.load(std::memory_order_relaxed);
+            const uint64_t block_packets = zc.packets_deserialize_block.load(std::memory_order_relaxed);
+            const uint64_t raw_bytes = zc.bytes_copied_raw.load(std::memory_order_relaxed);
+            const uint64_t block_bytes = zc.bytes_copied_block.load(std::memory_order_relaxed);
+            const uint64_t total_packets = raw_packets + block_packets;
+            const uint64_t total_copied_bytes = raw_bytes + block_bytes;
+            const uint64_t corrupted_packets = zc.packets_corrupted.load(std::memory_order_relaxed);
+            const uint64_t incomplete_packets = zc.packets_incomplete.load(std::memory_order_relaxed);
+            const uint64_t block_ratio_pct = (total_packets == 0) ? 0 : (block_packets * 100 / total_packets);
+
+            logger_->info("[metrics.zero_copy] packets_total=" + std::to_string(total_packets) +
+                          " raw=" + std::to_string(raw_packets) +
+                          " block=" + std::to_string(block_packets) +
+                          " block_ratio_pct=" + std::to_string(block_ratio_pct) +
+                          " copied_bytes_total=" + std::to_string(total_copied_bytes) +
+                          " copied_bytes_raw=" + std::to_string(raw_bytes) +
+                          " copied_bytes_block=" + std::to_string(block_bytes) +
+                          " corrupted=" + std::to_string(corrupted_packets) +
+                          " incomplete=" + std::to_string(incomplete_packets));
         }
     }
 }

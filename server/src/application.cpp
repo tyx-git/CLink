@@ -209,6 +209,11 @@ void Application::apply_configuration() {
 
             if (auto* impl = dynamic_cast<network::DefaultSessionManager*>(session_manager_.get())) {
                 impl->set_virtual_interface_enabled(vif_enabled);
+
+                const bool zero_copy_enabled = configuration_.get_bool("network.zerocopy.enabled", true);
+                impl->set_zero_copy_enabled(zero_copy_enabled);
+                logger_->info(std::string("[apply] stage=session_manager.zerocopy=") + (zero_copy_enabled ? "true" : "false"));
+
                 impl->set_session_event_callback([this](network::SessionEvent event, const std::string& session_id) {
                     asio::post(io_context_, [this, event, session_id]() {
                         on_session_event(event, session_id);
@@ -243,12 +248,20 @@ void Application::apply_configuration() {
             impl->set_virtual_interface_enabled(vif_enabled);
             logger_->info(std::string("[apply] stage=session_manager.vif.enabled=") + (vif_enabled ? "true" : "false"));
 
+            const bool zero_copy_enabled = configuration_.get_bool("network.zerocopy.enabled", true);
+            impl->set_zero_copy_enabled(zero_copy_enabled);
+            logger_->info(std::string("[apply] stage=session_manager.zerocopy=") + (zero_copy_enabled ? "true" : "false"));
+
             int idle_timeout_sec = configuration_.get_int("network.session_idle_timeout_sec", 0);
             if (idle_timeout_sec < 0) {
                 idle_timeout_sec = 0;
             }
             impl->set_session_idle_timeout(std::chrono::seconds(idle_timeout_sec));
             logger_->info("[apply] stage=session_manager.idle_timeout_sec", idle_timeout_sec);
+
+            const bool reliability_timer_enabled = configuration_.get_bool("network.reliability_timer_enabled", true);
+            impl->set_reliability_timer_enabled(reliability_timer_enabled);
+            logger_->info("[apply] stage=session_manager.reliability_timer_enabled", reliability_timer_enabled ? "true" : "false");
         }
 
         // 2. 应用全局带宽限制

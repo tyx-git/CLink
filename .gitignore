@@ -17,7 +17,7 @@ external/
 # Logs
 logs/
 *.log
-AGENTS.md
+!AGENTS.md
 Out/
 test/
 config/certs/

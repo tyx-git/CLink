@@ -42,6 +42,7 @@ private:
     void do_receive();
     void do_read_header();
     void do_read_body(std::shared_ptr<memory::Block> block, uint16_t payload_size);
+    bool validate_payload_size(uint16_t payload_size);
 
     asio::io_context& io_context_;
     std::shared_ptr<logging::Logger> logger_;

@@ -101,10 +101,12 @@ void ReliabilityEngine::start_async(std::function<void(std::error_code)> on_star
         try {
             self->running_ = true;
 
-            bool enable_timer = false;
+            bool enable_timer = self->timer_enabled_.load(std::memory_order_relaxed);
             if (const char* env = std::getenv("CLINK_ENABLE_RELIABILITY_TIMER")) {
                 if (std::string(env) == "1") {
                     enable_timer = true;
+                } else if (std::string(env) == "0") {
+                    enable_timer = false;
                 }
             }
 

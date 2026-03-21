@@ -8,6 +8,7 @@
 #include <memory>
 #include <cstdint>
 #include "server/include/clink/core/memory/buffer_pool.hpp"
+#include "server/include/clink/core/logging/logger.hpp"
 
 namespace clink::core::network {
 
@@ -52,6 +53,16 @@ public:
     virtual std::error_code write_packet(const clink::core::memory::Block& block) {
         return write_packet(block.begin(), block.size());
     }
+
+    /**
+     * @brief 设置日志句柄 (平台可忽略)
+     */
+    virtual void set_logger(std::shared_ptr<clink::core::logging::Logger> /*logger*/) {}
+
+    /**
+     * @brief 启用/禁用零拷贝优化 (平台可忽略)
+     */
+    virtual void set_zero_copy_enabled(bool /*enabled*/) {}
 
     /**
      * @brief 获取接口 MTU

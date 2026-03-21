@@ -5,6 +5,8 @@
 #include <memory>
 #include <chrono>
 #include <cstring>
+#include <atomic>
+#include <limits>
 #include "server/include/clink/core/memory/buffer_pool.hpp"
 #include <asio/buffer.hpp>
 
@@ -20,6 +22,18 @@ enum class PacketType : uint8_t {
     Control = 0x04,   // 控制信令
     Sack = 0x05       // 选择性确认包
 };
+
+struct PacketCopyStats {
+    std::atomic<uint64_t> packets_deserialize_raw{0};
+    std::atomic<uint64_t> packets_deserialize_block{0};
+    std::atomic<uint64_t> bytes_copied_raw{0};
+    std::atomic<uint64_t> bytes_copied_block{0};
+    std::atomic<uint64_t> packets_corrupted{0};
+    std::atomic<uint64_t> packets_incomplete{0};
+};
+
+const PacketCopyStats& packet_copy_stats() noexcept;
+void reset_packet_copy_stats() noexcept;
 
 /**
  * @brief 数据包头部结构 (小端对齐)
@@ -39,6 +53,8 @@ struct PacketHeader {
 /**
  * @brief 完整数据包对象
  */
+constexpr uint16_t kMaxPayloadSize = 64 * 1024;
+
 struct Packet {
     PacketHeader header{}; // Zero-initialize header
     
@@ -55,8 +71,9 @@ struct Packet {
         : block(std::move(b)), offset(off) {
          std::memset(&header, 0, sizeof(header));
          if (block) {
-             // Ensure offset is valid?
-             header.payload_size = static_cast<uint16_t>(block->size() > offset ? block->size() - offset : 0);
+             const size_t available = (block->size() > offset) ? (block->size() - offset) : 0;
+             const size_t capped = std::min<size_t>(available, kMaxPayloadSize);
+             header.payload_size = static_cast<uint16_t>(capped);
          }
     }
 

@@ -1,5 +1,4 @@
 #include "server/include/clink/core/network/tls_adapter.hpp"
-#include <iostream>
 #include <chrono>
 #include <vector>
 #include <algorithm>
@@ -51,7 +50,7 @@ void TlsTransportAdapter::set_certificates(const std::string& ca_cert, const std
 
 std::error_code TlsTransportAdapter::start(const std::string& endpoint) {
     if (running_) return {};
-    std::cerr << "TlsTransportAdapter::start " << endpoint << std::endl;
+    if (logger_) logger_->info("[tls] stage=start status=begin endpoint=" + endpoint);
 
     remote_endpoint_ = endpoint;
     
@@ -68,7 +67,7 @@ std::error_code TlsTransportAdapter::start(const std::string& endpoint) {
     try {
         ssl_ctx_ = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
     } catch (const std::exception& e) {
-        std::cerr << "Failed to create ssl_ctx: " << e.what() << std::endl;
+        if (logger_) logger_->error(std::string("[tls] stage=ssl_ctx status=failed msg=") + e.what());
         return std::make_error_code(std::errc::not_enough_memory);
     }
     
@@ -79,23 +78,22 @@ std::error_code TlsTransportAdapter::start(const std::string& endpoint) {
             ssl_ctx_->set_verify_mode(asio::ssl::verify_none); // DEBUG: Disable verify
             /*
             ssl_ctx_->set_verify_callback([this](bool preverified, asio::ssl::verify_context& ctx) {
-                std::cerr << "Client verify callback: preverified=" << preverified << std::endl;
+                if (logger_) logger_->info(std::string("[tls] stage=verify status=begin preverified=") + (preverified ? "true" : "false"));
                 if (!preverified) {
                     X509* cert = X509_STORE_CTX_get_current_cert(ctx.native_handle());
                     if (cert) {
                         char subject[256];
                         X509_NAME_oneline(X509_get_subject_name(cert), subject, 256);
-                        std::cerr << "Client failed to verify: " << subject << std::endl;
+                        if (logger_) logger_->warn(std::string("[tls] stage=verify status=failed subject=") + subject);
                     }
                     int err = X509_STORE_CTX_get_error(ctx.native_handle());
-                    std::cerr << "Client verify error: " << X509_verify_cert_error_string(err) << std::endl;
+                    if (logger_) logger_->warn(std::string("[tls] stage=verify status=failed err=") + X509_verify_cert_error_string(err));
                 }
                 return this->verify_certificate(preverified, ctx);
             });
             */
         } catch (const std::exception& e) {
-            std::cerr << "Failed to load CA cert: " << e.what() << std::endl;
-            if (logger_) logger_->error("[tls] failed to load CA cert: " + std::string(e.what()));
+            if (logger_) logger_->error(std::string("[tls] stage=ca_cert status=failed msg=") + e.what());
             return std::make_error_code(std::errc::invalid_argument);
         }
     } else {
@@ -107,47 +105,46 @@ std::error_code TlsTransportAdapter::start(const std::string& endpoint) {
             ssl_ctx_->use_certificate_chain_file(client_cert_path_);
             ssl_ctx_->use_private_key_file(client_key_path_, asio::ssl::context::pem);
         } catch (const std::exception& e) {
-             std::cerr << "Failed to load client certs: " << e.what() << std::endl;
-             if (logger_) logger_->error("[tls] failed to load client certs: " + std::string(e.what()));
+             if (logger_) logger_->error(std::string("[tls] stage=client_certs status=failed msg=") + e.what());
              return std::make_error_code(std::errc::invalid_argument);
         }
     }
 
-    std::cerr << "Creating socket..." << std::endl;
     asio::ip::tcp::socket socket(io_context_);
     stream_ = std::make_unique<asio::ssl::stream<asio::ip::tcp::socket>>(std::move(socket), *ssl_ctx_);
 
     asio::ip::tcp::resolver resolver(io_context_);
     asio::ip::tcp::resolver::results_type endpoints;
     try {
-        std::cerr << "Resolving..." << std::endl;
         endpoints = resolver.resolve(ip, std::to_string(port));
     } catch (const std::exception& e) {
-        std::cerr << "Resolve failed: " << e.what() << std::endl;
-        if (logger_) logger_->error("[tls] failed to resolve " + endpoint + ": " + std::string(e.what()));
+        if (logger_) logger_->error("[tls] stage=resolve status=failed endpoint=" + endpoint + " msg=" + e.what());
         return std::make_error_code(std::errc::host_unreachable);
     }
 
     std::error_code ec;
-    std::cerr << "Connecting..." << std::endl;
     asio::connect(stream_->lowest_layer(), endpoints, ec);
     if (ec) {
-        std::cerr << "Connect failed: " << ec.message() << std::endl;
-        if (logger_) logger_->error("[tls] failed to connect to " + endpoint + ": " + ec.message());
+        if (logger_) logger_->error("[tls] stage=connect status=failed endpoint=" + endpoint + " msg=" + ec.message());
         return ec;
     }
     
     stream_->lowest_layer().set_option(asio::ip::tcp::no_delay(true));
 
-    std::cerr << "Starting handshake..." << std::endl;
     running_ = true;
     // Async handshake to avoid blocking
     auto self = shared_from_this();
     asio::post(io_context_, [this, self]() {
-        if (!stream_) std::cerr << "Stream is null!" << std::endl;
-        if (!ssl_ctx_) std::cerr << "SSL Context is null!" << std::endl;
+        if (!stream_) {
+            if (logger_) logger_->error("[tls] stage=handshake status=failed detail=stream_null");
+            return;
+        }
+        if (!ssl_ctx_) {
+            if (logger_) logger_->error("[tls] stage=handshake status=failed detail=ssl_ctx_null");
+            return;
+        }
+        if (logger_) logger_->info("[tls] stage=handshake status=begin");
         do_handshake();
-        std::cerr << "Handshake initiated on strand" << std::endl;
     });
     return {};
 }
@@ -156,7 +153,7 @@ void TlsTransportAdapter::stop() {
     bool expected = true;
     if (running_.compare_exchange_strong(expected, false)) {
         if (logger_) {
-            logger_->info("[tls] stopping adapter");
+            logger_->info("[tls] stage=stop status=begin");
         }
         if (stream_) {
             std::error_code ec;
@@ -211,7 +208,7 @@ void TlsTransportAdapter::do_write() {
                 do_write();
             }
         } else if (ec != asio::error::operation_aborted) {
-            if (logger_) logger_->error("[tls] send failed: " + ec.message());
+            if (logger_) logger_->error("[tls] stage=send status=failed msg=" + ec.message());
             stop();
         }
     };
@@ -238,8 +235,7 @@ void TlsTransportAdapter::do_handshake() {
     timer->expires_after(std::chrono::seconds(10));
     timer->async_wait([self, timer](const std::error_code& ec) {
         if (!ec) {
-             if (self->logger_) self->logger_->error("[tls] client handshake timed out");
-             std::cerr << "TlsTransportAdapter: Handshake timed out" << std::endl;
+             if (self->logger_) self->logger_->error("[tls] stage=handshake status=failed detail=timeout");
              self->stop();
         }
     });
@@ -248,19 +244,17 @@ void TlsTransportAdapter::do_handshake() {
         [this, self, timer](std::error_code ec) {
             timer->cancel();
             if (!ec) {
-                if (logger_) logger_->info("[tls] SSL client handshake successful with " + remote_endpoint_);
+                if (logger_) logger_->info("[tls] stage=handshake status=ok detail=client endpoint=" + remote_endpoint_);
                 handshake_complete_ = true;
                 if (!write_queue_.empty()) {
                     do_write();
                 }
                 do_receive();
             } else if (ec != asio::error::operation_aborted) {
-                if (logger_) logger_->error("[tls] SSL client handshake failed: " + ec.message());
-                std::cerr << "TlsTransportAdapter: Handshake failed: " << ec.message() << std::endl;
+                if (logger_) logger_->error("[tls] stage=handshake status=failed detail=client msg=" + ec.message());
                 stop();
             }
         });
-    // std::cerr << "Client async_handshake SKIPPED for debugging" << std::endl;
 }
 
 void TlsTransportAdapter::do_receive() {
@@ -283,7 +277,7 @@ void TlsTransportAdapter::do_receive() {
                 do_receive();
             } else if (ec != asio::error::operation_aborted) {
                 if (logger_) {
-                    logger_->info("[tls] connection closed or error: " + ec.message());
+                    logger_->info("[tls] stage=read status=closed msg=" + ec.message());
                 }
                 stop();
             }
@@ -351,16 +345,16 @@ void TlsTransportListener::set_certificates(const std::string& ca_cert, const st
         
         /*
         ssl_ctx_->set_verify_callback([this](bool preverified, asio::ssl::verify_context& ctx) {
-            std::cerr << "Server verify callback: preverified=" << preverified << std::endl;
+            if (logger_) logger_->info(std::string("[tls] stage=verify status=begin role=server preverified=") + (preverified ? "true" : "false"));
             if (!preverified) {
                 X509* cert = X509_STORE_CTX_get_current_cert(ctx.native_handle());
                 if (cert) {
                     char subject[256];
                     X509_NAME_oneline(X509_get_subject_name(cert), subject, 256);
-                    std::cerr << "Server failed to verify: " << subject << std::endl;
+                    if (logger_) logger_->warn(std::string("[tls] stage=verify status=failed role=server subject=") + subject);
                 }
                 int err = X509_STORE_CTX_get_error(ctx.native_handle());
-                std::cerr << "Server verify error: " << X509_verify_cert_error_string(err) << std::endl;
+                if (logger_) logger_->warn(std::string("[tls] stage=verify status=failed role=server err=") + X509_verify_cert_error_string(err));
             }
             return preverified;
         });
@@ -412,7 +406,7 @@ std::error_code TlsTransportListener::listen(const std::string& endpoint) {
     running_ = true;
 
     if (logger_) {
-        logger_->info("[tls] listening on " + endpoint + " (SSL/TLS ready)");
+        logger_->info("[tls] stage=listen status=ok endpoint=" + endpoint);
     }
 
     do_accept();
@@ -423,7 +417,7 @@ void TlsTransportListener::stop() {
     bool expected = true;
     if (running_.compare_exchange_strong(expected, false)) {
         if (logger_) {
-            logger_->info("[tls] stopping listener on " + listen_endpoint_);
+            logger_->info("[tls] stage=listen.stop status=begin endpoint=" + listen_endpoint_);
         }
         std::error_code ec;
         acceptor_.close(ec);
@@ -439,48 +433,52 @@ void TlsTransportListener::do_accept() {
     acceptor_.async_accept(io_context_,
         [this, self](std::error_code ec, asio::ip::tcp::socket socket) {
             if (!ec) {
-                std::cerr << "TlsTransportListener: Accepted connection from " << socket.remote_endpoint() << std::endl;
+                if (logger_) {
+                    std::string remote;
+                    try {
+                        remote = socket.remote_endpoint().address().to_string() + ":" + std::to_string(socket.remote_endpoint().port());
+                    } catch (...) {
+                        remote = "unknown";
+                    }
+                    logger_->info("[tls] stage=accept status=ok remote=" + remote);
+                }
+
                 socket.set_option(asio::ip::tcp::no_delay(true));
                 auto stream = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket>>(std::move(socket), *ssl_ctx_);
-                
-                std::cerr << "TlsTransportListener: Starting server handshake" << std::endl;
-                
+
+                if (logger_) logger_->info("[tls] stage=handshake status=begin role=server");
+
                 auto timer = std::make_shared<asio::steady_timer>(io_context_);
                 timer->expires_after(std::chrono::seconds(10));
-                timer->async_wait([stream](const std::error_code& ec) {
+                timer->async_wait([this, stream](const std::error_code& ec) {
                     if (!ec) {
-                        std::cerr << "TlsTransportListener: Handshake timed out" << std::endl;
+                        if (logger_) logger_->warn("[tls] stage=handshake status=failed detail=timeout role=server");
                         std::error_code ignore;
                         stream->lowest_layer().close(ignore);
                     }
                 });
 
-                std::cerr << "TlsTransportListener: Calling async_handshake" << std::endl;
                 stream->async_handshake(asio::ssl::stream_base::server,
                     [this, self, stream, timer](std::error_code ec) {
-                        std::cerr << "Server handshake callback" << std::endl;
                         timer->cancel();
                         if (!ec) {
-                            std::cerr << "TlsTransportListener: Handshake success" << std::endl;
-                            if (logger_) logger_->info("[tls] SSL server handshake successful");
+                            if (logger_) logger_->info("[tls] stage=handshake status=ok role=server");
                             if (connection_callback_) {
                                 auto adapter = std::make_shared<TlsTransportAdapter>(io_context_, logger_, std::move(*stream), ssl_ctx_);
                                 adapter->start_accepted();
                                 connection_callback_(std::move(adapter));
                             }
                         } else {
-                            std::cerr << "TlsTransportListener: Handshake failed: " << ec.message() << std::endl;
                             if (logger_) {
-                                logger_->error("[tls] SSL server handshake failed: " + ec.message());
+                                logger_->error("[tls] stage=handshake status=failed role=server msg=" + ec.message());
                             }
                         }
                     });
-                
+
                 do_accept();
             } else if (ec != asio::error::operation_aborted) {
-                std::cerr << "TlsTransportListener: Accept failed: " << ec.message() << std::endl;
                 if (logger_) {
-                    logger_->error("[tls] accept error: " + ec.message());
+                    logger_->error("[tls] stage=accept status=failed msg=" + ec.message());
                 }
             }
         });

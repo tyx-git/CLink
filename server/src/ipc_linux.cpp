@@ -16,6 +16,7 @@
 namespace {
 constexpr char kShutdownCommand[] = "__clink_shutdown__";
 constexpr auto kHandlerTimeout = std::chrono::seconds(5);
+constexpr uint32_t kMaxIpcMessageSize = 1 * 1024 * 1024; // 1MB hard limit
 
 std::string json_escape(const std::string& input) {
     std::string out;
@@ -31,6 +32,38 @@ std::string json_escape(const std::string& input) {
         }
     }
     return out;
+}
+
+bool read_full(int fd, void* buf, size_t len) {
+    auto* p = static_cast<char*>(buf);
+    size_t remaining = len;
+    while (remaining > 0) {
+        const ssize_t n = ::read(fd, p, remaining);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        p += static_cast<size_t>(n);
+        remaining -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
+bool write_full(int fd, const void* buf, size_t len) {
+    const auto* p = static_cast<const char*>(buf);
+    size_t remaining = len;
+    while (remaining > 0) {
+        const ssize_t n = ::write(fd, p, remaining);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        p += static_cast<size_t>(n);
+        remaining -= static_cast<size_t>(n);
+    }
+    return true;
 }
 }
 
@@ -113,14 +146,24 @@ private:
     }
 
     void process_client(int client_fd) {
-        std::string raw;
-        char buf[4096];
-        ssize_t n = ::read(client_fd, buf, sizeof(buf));
-        if (n <= 0) {
+        uint32_t net_len = 0;
+        if (!read_full(client_fd, &net_len, sizeof(net_len))) {
             ::close(client_fd);
             return;
         }
-        raw.assign(buf, buf + n);
+
+        const uint32_t total_len = ntohl(net_len);
+        if (total_len == 0 || total_len > kMaxIpcMessageSize) {
+            ::close(client_fd);
+            return;
+        }
+
+        std::string raw;
+        raw.resize(total_len);
+        if (!read_full(client_fd, raw.data(), raw.size())) {
+            ::close(client_fd);
+            return;
+        }
 
         auto sep = raw.find('|');
         Message req{MessageType::Request, sep == std::string::npos ? raw : raw.substr(0, sep),
@@ -169,26 +212,17 @@ private:
         }
 
         std::string out = resp.command + "|" + resp.payload;
-        const char* write_ptr = out.data();
-        size_t remaining = out.size();
-        bool write_ok = true;
-        while (remaining > 0) {
-            const ssize_t wn = ::write(client_fd, write_ptr, remaining);
-            if (wn < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-                write_ok = false;
-                if (logger_) logger_->warn("[ipc] failed to write unix socket response");
-                break;
+        const uint32_t total_len = static_cast<uint32_t>(out.size());
+        uint32_t net_len = htonl(total_len);
+
+        bool write_ok = write_full(client_fd, &net_len, sizeof(net_len));
+        if (write_ok) {
+            write_ok = write_full(client_fd, out.data(), out.size());
+            if (!write_ok && logger_) {
+                logger_->warn("[ipc] failed to write unix socket response");
             }
-            if (wn == 0) {
-                write_ok = false;
-                if (logger_) logger_->warn("[ipc] unix socket write returned zero bytes");
-                break;
-            }
-            write_ptr += static_cast<size_t>(wn);
-            remaining -= static_cast<size_t>(wn);
+        } else if (logger_) {
+            logger_->warn("[ipc] failed to write unix socket response length");
         }
 
         if (write_ok && logger_) {
@@ -237,17 +271,38 @@ public:
         }
 
         std::string out = request.command + "|" + request.payload;
-        if (::write(fd, out.data(), out.size()) < 0) {
+        if (out.size() == 0 || out.size() > kMaxIpcMessageSize) {
+            ::close(fd);
+            return err("request too large");
+        }
+
+        const uint32_t total_len = static_cast<uint32_t>(out.size());
+        uint32_t net_len = htonl(total_len);
+        if (!write_full(fd, &net_len, sizeof(net_len)) || !write_full(fd, out.data(), out.size())) {
             ::close(fd);
             return err("failed to write request");
         }
 
-        char buf[4096];
-        ssize_t n = ::read(fd, buf, sizeof(buf));
-        ::close(fd);
-        if (n <= 0) return err("failed to read response");
+        uint32_t resp_net_len = 0;
+        if (!read_full(fd, &resp_net_len, sizeof(resp_net_len))) {
+            ::close(fd);
+            return err("failed to read response length");
+        }
 
-        std::string raw(buf, buf + n);
+        const uint32_t resp_len = ntohl(resp_net_len);
+        if (resp_len == 0 || resp_len > kMaxIpcMessageSize) {
+            ::close(fd);
+            return err("invalid response length");
+        }
+
+        std::string raw;
+        raw.resize(resp_len);
+        if (!read_full(fd, raw.data(), raw.size())) {
+            ::close(fd);
+            return err("failed to read response");
+        }
+
+        ::close(fd);
         auto sep = raw.find('|');
         return {MessageType::Response, request.command, sep == std::string::npos ? raw : raw.substr(sep + 1)};
     }
