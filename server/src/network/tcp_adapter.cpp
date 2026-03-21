@@ -1,5 +1,4 @@
 #include "server/include/clink/core/network/tcp_adapter.hpp"
-#include <iostream>
 #include <chrono>
 
 namespace clink::core::network {
@@ -49,7 +48,7 @@ std::error_code TcpTransportAdapter::start(const std::string& endpoint) {
     asio::connect(socket_, endpoints, ec);
     if (ec) {
         if (logger_) {
-            logger_->error("[tcp] failed to connect to " + endpoint + ": " + ec.message());
+            logger_->error("[tcp] stage=connect status=failed endpoint=" + endpoint + " msg=" + ec.message());
         }
         return ec;
     }
@@ -57,7 +56,7 @@ std::error_code TcpTransportAdapter::start(const std::string& endpoint) {
     running_ = true;
 
     if (logger_) {
-        logger_->info("[tcp] starting adapter on " + endpoint);
+        logger_->info("[tcp] stage=start status=ok endpoint=" + endpoint);
     }
 
     do_receive();
@@ -69,7 +68,7 @@ void TcpTransportAdapter::stop() {
     bool expected = true;
     if (running_.compare_exchange_strong(expected, false)) {
         if (logger_) {
-            logger_->info("[tcp] stopping adapter");
+            logger_->info("[tcp] stage=stop status=begin");
         }
         std::error_code ec;
         socket_.cancel(ec);
@@ -84,7 +83,7 @@ std::error_code TcpTransportAdapter::send(const uint8_t* data, size_t size) {
     asio::write(socket_, asio::buffer(data, size), ec);
     
     if (ec && logger_) {
-        logger_->error("[tcp] send failed: " + ec.message());
+        logger_->error("[tcp] stage=send status=failed msg=" + ec.message());
     }
     
     return ec;
@@ -101,7 +100,7 @@ std::error_code TcpTransportAdapter::send(const Packet& packet) {
     asio::write(socket_, temp.serialize_to_buffers(), ec);
     
     if (ec && logger_) {
-        logger_->error("[tcp] send packet failed: " + ec.message());
+        logger_->error("[tcp] stage=send_packet status=failed msg=" + ec.message());
     }
     
     return ec;
@@ -126,7 +125,7 @@ void TcpTransportAdapter::do_receive() {
 void TcpTransportAdapter::do_read_header() {
     auto self = weak_from_this();
     if (self.expired()) {
-        if (logger_) logger_->error("[tcp] adapter lifetime invalid before read header");
+        if (logger_) logger_->error("[tcp] stage=read_header status=failed detail=expired_self");
         stop();
         return;
     }
@@ -145,7 +144,15 @@ void TcpTransportAdapter::do_read_header() {
                 // Parse header to get payload size
                 const PacketHeader* hdr = reinterpret_cast<const PacketHeader*>(block->begin());
                 uint16_t payload_size = hdr->payload_size;
-                
+
+                if (!validate_payload_size(payload_size)) {
+                    if (logger_) {
+                        logger_->warn("[tcp] stage=read_header status=failed detail=payload_size value=" + std::to_string(payload_size));
+                    }
+                    stop();
+                    return;
+                }
+
                 if (payload_size > 0) {
                     // We need a block that can hold header + payload
                     // If current block is too small, we need a new one
@@ -170,9 +177,9 @@ void TcpTransportAdapter::do_read_header() {
                     if (stopping_.load(std::memory_order_relaxed) ||
                         ec == asio::error::connection_reset ||
                         ec == asio::error::eof) {
-                        logger_->info("[tcp] read header closed: " + ec.message());
+                        logger_->info("[tcp] stage=read_header status=closed msg=" + ec.message());
                     } else {
-                        logger_->error("[tcp] read header error: " + ec.message());
+                        logger_->error("[tcp] stage=read_header status=failed msg=" + ec.message());
                     }
                 }
                 stop();
@@ -197,14 +204,21 @@ void TcpTransportAdapter::do_read_body(std::shared_ptr<memory::Block> block, uin
                     if (stopping_.load(std::memory_order_relaxed) ||
                         ec == asio::error::connection_reset ||
                         ec == asio::error::eof) {
-                        logger_->info("[tcp] read body closed: " + ec.message());
+                        logger_->info("[tcp] stage=read_body status=closed msg=" + ec.message());
                     } else {
-                        logger_->error("[tcp] read body error: " + ec.message());
+                        logger_->error("[tcp] stage=read_body status=failed msg=" + ec.message());
                     }
                 }
                 stop();
             }
         });
+}
+
+bool TcpTransportAdapter::validate_payload_size(uint16_t payload_size) {
+    if (payload_size > kMaxPayloadSize) {
+        return false;
+    }
+    return true;
 }
 
 // --- TcpTransportListener ---
@@ -249,7 +263,7 @@ std::error_code TcpTransportListener::listen(const std::string& endpoint) {
     running_ = true;
 
     if (logger_) {
-        logger_->info("[tcp] listening on " + endpoint);
+        logger_->info("[tcp] stage=listen status=ok endpoint=" + endpoint);
     }
 
     do_accept();
@@ -260,7 +274,7 @@ void TcpTransportListener::stop() {
     bool expected = true;
     if (running_.compare_exchange_strong(expected, false)) {
         if (logger_) {
-            logger_->info("[tcp] stopping listener on " + listen_endpoint_);
+            logger_->info("[tcp] stage=listen.stop status=begin endpoint=" + listen_endpoint_);
         }
         std::error_code ec;
         acceptor_.close(ec);
@@ -284,7 +298,7 @@ void TcpTransportListener::do_accept() {
                 do_accept();
             } else if (ec != asio::error::operation_aborted) {
                 if (logger_) {
-                    logger_->error("[tcp] accept error: " + ec.message());
+                    logger_->error("[tcp] stage=accept status=failed msg=" + ec.message());
                 }
             }
         });

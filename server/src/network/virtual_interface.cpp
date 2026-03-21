@@ -41,6 +41,12 @@ namespace {
 
 constexpr DWORD kDefaultRingCapacity = 4 * 1024 * 1024;  // 4MB ring buffer
 
+std::weak_ptr<clink::core::logging::Logger> g_vif_logger;
+
+std::shared_ptr<clink::core::logging::Logger> vif_logger() {
+    return g_vif_logger.lock();
+}
+
 class WintunApi {
 public:
     using OpenAdapterFn = WINTUN_OPEN_ADAPTER_FUNC*;
@@ -147,13 +153,16 @@ public:
         }
 
         if (!module_) {
-            std::cerr << "[virtual_interface] DLL from " << arch_tag
-                      << " loading failed" << std::endl;
+            if (vif_logger()) {
+                vif_logger()->error(std::string("[vif] stage=wintun.load status=failed detail=dll arch=") + arch_tag);
+            }
             return false;
         }
 
-        std::cerr << "[virtual_interface] DLL from " << arch_tag
-                  << " loading success: " << wide_to_utf8(loaded_path) << std::endl;
+        if (vif_logger()) {
+            vif_logger()->info(std::string("[vif] stage=wintun.load status=ok arch=") + arch_tag +
+                               " path=" + wide_to_utf8(loaded_path));
+        }
 
         auto load_proc = [this](auto& fn, const char* name) -> bool {
 #if defined(__GNUC__)
@@ -166,8 +175,10 @@ public:
 #endif
             if (!fn) {
                 const DWORD err = GetLastError();
-                std::cerr << "[virtual_interface] GetProcAddress failed name='" << name
-                          << "' err=" << err << std::endl;
+                if (vif_logger()) {
+                    vif_logger()->error(std::string("[vif] stage=wintun.proc status=failed name=") + name +
+                                        " err=" + std::to_string(err));
+                }
                 return false;
             }
             return true;
@@ -226,15 +237,11 @@ std::string narrow(const std::wstring& text) {
     }
     const int len = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
     if (len <= 0) {
-        const DWORD err = GetLastError();
-        std::cerr << "[virtual_interface] narrow size query failed err=" << err << std::endl;
         return {};
     }
     std::string utf8(static_cast<size_t>(len), '\0');
     const int written = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, utf8.data(), len, nullptr, nullptr);
     if (written <= 0) {
-        const DWORD err = GetLastError();
-        std::cerr << "[virtual_interface] narrow conversion failed err=" << err << std::endl;
         return {};
     }
     if (!utf8.empty() && utf8.back() == '\0') {
@@ -249,15 +256,11 @@ std::wstring widen(const std::string& text) {
     }
     const int len = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
     if (len <= 0) {
-        const DWORD err = GetLastError();
-        std::cerr << "[virtual_interface] widen size query failed err=" << err << std::endl;
         return {};
     }
     std::wstring wide(static_cast<size_t>(len), L'\0');
     const int written = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wide.data(), len);
     if (written <= 0) {
-        const DWORD err = GetLastError();
-        std::cerr << "[virtual_interface] widen conversion failed err=" << err << std::endl;
         return {};
     }
     if (!wide.empty() && wide.back() == L'\0') {
@@ -424,10 +427,12 @@ std::vector<AdapterCandidate> BuildAdapterPriorityList(const std::string& reques
         return false;
     }();
 
-    std::cerr << "[virtual_interface] adapter_select requested='" << requested
-              << "' force_backend='" << (force_backend.empty() ? "auto" : force_backend)
-              << "' skip_wintun=" << (skip_wintun ? "1" : "0")
-              << " skip_tap=" << (skip_tap ? "1" : "0") << std::endl;
+    if (vif_logger()) {
+        vif_logger()->info(std::string("[vif] stage=adapter.select status=ok requested=") + requested +
+                           " force=" + (force_backend.empty() ? "auto" : force_backend) +
+                           " skip_wintun=" + (skip_wintun ? "1" : "0") +
+                           " skip_tap=" + (skip_tap ? "1" : "0"));
+    }
 
     auto taps = skip_tap ? std::vector<AdapterCandidate>{} : EnumerateTapAdapters();
 
@@ -455,15 +460,19 @@ std::vector<AdapterCandidate> BuildAdapterPriorityList(const std::string& reques
             bootstrap.normalized_name = toLowerCopy(bootstrap.friendly);
             bootstrap.normalized_identifier = normalizeGuid(bootstrap.identifier);
             wintuns.push_back(std::move(bootstrap));
-            std::cerr << "[virtual_interface] no adapter found, bootstrap candidate created for wintun" << std::endl;
+            if (vif_logger()) {
+                vif_logger()->warn("[vif] stage=adapter.select status=ok detail=wintun_bootstrap");
+            }
         }
     }
 
     if (taps.empty() && wintuns.empty()) {
-        if (!skip_wintun && !wintun_dll_loaded) {
-            std::cerr << "[virtual_interface] no such adapter (wintun dll unavailable)" << std::endl;
-        } else {
-            std::cerr << "[virtual_interface] no such adapter" << std::endl;
+        if (vif_logger()) {
+            if (!skip_wintun && !wintun_dll_loaded) {
+                vif_logger()->warn("[vif] stage=adapter.select status=failed detail=wintun_dll_unavailable");
+            } else {
+                vif_logger()->warn("[vif] stage=adapter.select status=failed detail=no_adapter");
+            }
         }
     }
     std::vector<AdapterCandidate> ordered;
@@ -515,6 +524,12 @@ std::vector<AdapterCandidate> BuildAdapterPriorityList(const std::string& reques
 #include <linux/if_tun.h>
 #include <unistd.h>
 #include <cstring>
+#include <atomic>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <sys/syscall.h>
+#include <linux/splice.h>
+#include <errno.h>
 #include <asio/posix/stream_descriptor.hpp>
 #endif
 
@@ -523,6 +538,8 @@ std::vector<AdapterCandidate> BuildAdapterPriorityList(const std::string& reques
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <string>
+#include <sstream>
 
 namespace clink::core::network {
 
@@ -555,16 +572,22 @@ public:
     using VirtualInterface::write_packet;
 
     explicit WindowsVirtualInterface(asio::io_context& io_context)
-        : io_context_(io_context) {
-        std::cerr << "[virtual_interface] WindowsVirtualInterface.ctor ok (lazy handle init)" << std::endl;
+        : io_context_(io_context) {}
+
+    void set_logger(std::shared_ptr<logging::Logger> logger) override {
+        logger_ = std::move(logger);
+        if (logger_) {
+            logger_->info("[vif] stage=logger status=ok detail=windows");
+        }
     }
 
     std::error_code open(const std::string& name,
                          const std::string& address,
                          const std::string& netmask) override {
-        std::cerr << "[virtual_interface] open.begin name='" << name
-                  << "' address='" << address
-                  << "' netmask='" << netmask << "'" << std::endl;
+        if (logger_) {
+            logger_->info(std::string("[vif] stage=open status=begin detail=windows name=") + name +
+                          " address=" + address + " netmask=" + netmask);
+        }
         close();
 
         std::string requested = name;
@@ -576,38 +599,43 @@ public:
 
         auto candidates = BuildAdapterPriorityList(requested);
         if (candidates.empty()) {
-            std::cerr << "[virtual_interface] no TAP/Wintun adapters detected" << std::endl;
+            if (logger_) logger_->warn("[vif] stage=open status=failed detail=no_adapter");
             return std::make_error_code(std::errc::no_such_device);
         }
 
         std::error_code last_error;
-        std::cerr << "[virtual_interface] candidate_count=" << candidates.size() << std::endl;
+        if (logger_) logger_->info("[vif] stage=adapter.candidates status=ok count=" + std::to_string(candidates.size()));
         for (const auto& candidate : candidates) {
             const char* typ = (candidate.type == AdapterType::Wintun) ? "wintun" : "tap";
-            std::cerr << "[virtual_interface] candidate.try type=" << typ
-                      << " id='" << candidate.identifier
-                      << "' friendly='" << candidate.friendly << "'" << std::endl;
+            if (logger_) {
+                logger_->info(std::string("[vif] stage=adapter.try status=begin type=") + typ +
+                              " id=" + candidate.identifier + " friendly=" + candidate.friendly);
+            }
             if (candidate.type == AdapterType::Wintun) {
                 auto ec = open_wintun_adapter(candidate);
                 if (!ec) {
                     backend_ = BackendType::Wintun;
                     name_ = candidate.friendly.empty() ? "wintun" : candidate.friendly;
-                    std::cerr << "[virtual_interface] candidate.ok type=wintun name='" << name_ << "'" << std::endl;
+                    if (logger_) logger_->info(std::string("[vif] stage=adapter.try status=ok type=wintun name=") + name_);
                     return {};
                 }
-                std::cerr << "[virtual_interface] candidate.fail type=wintun ec=" << ec.value()
-                          << " message='" << ec.message() << "'" << std::endl;
+                if (logger_) {
+                    logger_->warn(std::string("[vif] stage=adapter.try status=failed type=wintun ec=") +
+                                  std::to_string(ec.value()) + " msg=" + ec.message());
+                }
                 last_error = ec;
             } else {
                 auto ec = open_tap_adapter(candidate, address, netmask);
                 if (!ec) {
                     backend_ = BackendType::Tap;
                     name_ = candidate.friendly.empty() ? candidate.identifier : candidate.friendly;
-                    std::cerr << "[virtual_interface] candidate.ok type=tap name='" << name_ << "'" << std::endl;
+                    if (logger_) logger_->info(std::string("[vif] stage=adapter.try status=ok type=tap name=") + name_);
                     return {};
                 }
-                std::cerr << "[virtual_interface] candidate.fail type=tap ec=" << ec.value()
-                          << " message='" << ec.message() << "'" << std::endl;
+                if (logger_) {
+                    logger_->warn(std::string("[vif] stage=adapter.try status=failed type=tap ec=") +
+                                  std::to_string(ec.value()) + " msg=" + ec.message());
+                }
                 last_error = ec;
             }
         }
@@ -635,8 +663,8 @@ public:
             }
             if (wintun_adapter_) {
                 api.WintunCloseAdapter(wintun_adapter_);
-                if (wintun_adapter_created_by_us_) {
-                    std::cerr << "[virtual_interface] Wintun adapter closed (created by current process)" << std::endl;
+                if (logger_ && wintun_adapter_created_by_us_) {
+                    logger_->info("[vif] stage=wintun.close status=ok detail=created_by_us");
                 }
                 wintun_adapter_ = nullptr;
                 wintun_adapter_created_by_us_ = false;
@@ -687,7 +715,7 @@ public:
                     size_t ip_len = bytes_transferred - sizeof(EthernetHeader);
                     if (ip_len > buffer->tailroom()) {
                         // Packet too large for buffer
-                        std::cerr << "[virtual_interface] Packet too large: " << ip_len << std::endl;
+                        if (logger_) logger_->warn("[vif] stage=read status=skipped detail=packet_too_large bytes=" + std::to_string(ip_len));
                          async_read_packet(buffer, callback);
                          return;
                     }
@@ -764,9 +792,9 @@ private:
         if (!stream_handle_) {
             try {
                 stream_handle_ = std::make_unique<asio::windows::stream_handle>(io_context_);
-                std::cerr << "[virtual_interface] lazy init stream_handle ok" << std::endl;
+                if (logger_) logger_->info("[vif] stage=stream_handle.init status=ok");
             } catch (const std::exception& ex) {
-                std::cerr << "[virtual_interface] lazy init stream_handle failed: " << ex.what() << std::endl;
+                if (logger_) logger_->error(std::string("[vif] stage=stream_handle.init status=failed detail=") + ex.what());
                 return false;
             }
         }
@@ -777,9 +805,9 @@ private:
         if (!wintun_wait_handle_) {
             try {
                 wintun_wait_handle_ = std::make_unique<asio::windows::object_handle>(io_context_);
-                std::cerr << "[virtual_interface] lazy init wintun_wait_handle ok" << std::endl;
+                if (logger_) logger_->info("[vif] stage=wintun_wait_handle.init status=ok");
             } catch (const std::exception& ex) {
-                std::cerr << "[virtual_interface] lazy init wintun_wait_handle failed: " << ex.what() << std::endl;
+                if (logger_) logger_->error(std::string("[vif] stage=wintun_wait_handle.init status=failed detail=") + ex.what());
                 return false;
             }
         }
@@ -799,7 +827,7 @@ private:
         asio::async_write(*stream_handle_, asio::buffer(*buffer),
             [this, buffer](std::error_code ec, size_t /*length*/) {
                 if (ec) {
-                    std::cerr << "[virtual_interface] async_write failed: " << ec.message() << std::endl;
+                    if (logger_) logger_->warn(std::string("[vif] stage=write status=failed detail=async_write msg=") + ec.message());
                 }
                 write_queue_.pop_front();
                 if (!write_queue_.empty()) {
@@ -879,8 +907,8 @@ std::error_code WindowsVirtualInterface::open_tap_adapter(const AdapterCandidate
                                 FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
     if (handle == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
-        std::cerr << "[virtual_interface] failed to open TAP adapter " << candidate.identifier
-                  << ": " << err << std::endl;
+        if (logger_) logger_->error(std::string("[vif] stage=tap.open status=failed id=") + candidate.identifier +
+                                    " err=" + std::to_string(err));
         return std::error_code(static_cast<int>(err), std::system_category());
     }
 
@@ -938,73 +966,61 @@ std::error_code WindowsVirtualInterface::open_wintun_adapter(const AdapterCandid
         friendly = L"clink";
     }
 
-    std::cerr << "[virtual_interface] call.begin WintunOpenAdapter name='" << narrow(friendly) << "'" << std::endl;
+    if (logger_) logger_->info(std::string("[vif] stage=wintun.open status=begin name=") + narrow(friendly));
     WINTUN_ADAPTER_HANDLE adapter = api.WintunOpenAdapter(friendly.c_str());
-    std::cerr << "[virtual_interface] call.end WintunOpenAdapter ptr=" << reinterpret_cast<void*>(adapter) << std::endl;
 
     bool created_by_us = false;
     if (!adapter) {
         const DWORD open_err = GetLastError();
-        std::cerr << "[virtual_interface] WintunOpenAdapter failed name='" << narrow(friendly)
-                  << "' err=" << open_err << std::endl;
+        if (logger_) logger_->warn(std::string("[vif] stage=wintun.open status=failed name=") + narrow(friendly) +
+                                   " err=" + std::to_string(open_err));
 
-        std::cerr << "[virtual_interface] call.begin WintunCreateAdapter name='" << narrow(friendly) << "' type='CLink'" << std::endl;
+        if (logger_) logger_->info(std::string("[vif] stage=wintun.create status=begin name=") + narrow(friendly));
         adapter = api.WintunCreateAdapter(friendly.c_str(), L"CLink", nullptr);
-        std::cerr << "[virtual_interface] call.end WintunCreateAdapter ptr=" << reinterpret_cast<void*>(adapter) << std::endl;
 
         if (adapter) {
             created_by_us = true;
-            std::cerr << "[virtual_interface] WintunCreateAdapter success name='" << narrow(friendly) << "'" << std::endl;
+            if (logger_) logger_->info(std::string("[vif] stage=wintun.create status=ok name=") + narrow(friendly));
         }
     } else {
-        std::cerr << "[virtual_interface] WintunOpenAdapter success name='" << narrow(friendly) << "'" << std::endl;
+        if (logger_) logger_->info(std::string("[vif] stage=wintun.open status=ok name=") + narrow(friendly));
     }
     if (!adapter) {
         DWORD err = GetLastError();
         return std::error_code(static_cast<int>(err ? err : ERROR_FILE_NOT_FOUND), std::system_category());
     }
 
-    std::cerr << "[virtual_interface] call.begin WintunStartSession capacity=" << kDefaultRingCapacity << std::endl;
+    if (logger_) logger_->info("[vif] stage=wintun.session status=begin");
     WINTUN_SESSION_HANDLE session = api.WintunStartSession(adapter, kDefaultRingCapacity);
-    std::cerr << "[virtual_interface] call.end WintunStartSession ptr=" << reinterpret_cast<void*>(session) << std::endl;
     if (!session) {
         DWORD err = GetLastError();
-        std::cerr << "[virtual_interface] WintunStartSession failed err=" << err << std::endl;
-        std::cerr << "[virtual_interface] call.begin WintunCloseAdapter(after start fail)" << std::endl;
+        if (logger_) logger_->error(std::string("[vif] stage=wintun.session status=failed err=") + std::to_string(err));
         api.WintunCloseAdapter(adapter);
-        std::cerr << "[virtual_interface] call.end WintunCloseAdapter(after start fail)" << std::endl;
         return std::error_code(static_cast<int>(err ? err : ERROR_NOT_ENOUGH_MEMORY), std::system_category());
     }
 
-    std::cerr << "[virtual_interface] call.begin WintunGetReadWaitEvent" << std::endl;
     HANDLE evt = api.WintunGetReadWaitEvent(session);
-    std::cerr << "[virtual_interface] call.end WintunGetReadWaitEvent handle=" << evt << std::endl;
     if (!evt) {
-        std::cerr << "[virtual_interface] call.begin WintunEndSession(after wait event fail)" << std::endl;
         api.WintunEndSession(session);
-        std::cerr << "[virtual_interface] call.end WintunEndSession(after wait event fail)" << std::endl;
-        std::cerr << "[virtual_interface] call.begin WintunCloseAdapter(after wait event fail)" << std::endl;
         api.WintunCloseAdapter(adapter);
-        std::cerr << "[virtual_interface] call.end WintunCloseAdapter(after wait event fail)" << std::endl;
+        if (logger_) logger_->error("[vif] stage=wintun.wait_event status=failed");
         return std::make_error_code(std::errc::operation_not_permitted);
     }
 
     HANDLE duplicated = NULL;
-    std::cerr << "[virtual_interface] call.begin DuplicateHandle" << std::endl;
     if (!DuplicateHandle(GetCurrentProcess(), evt, GetCurrentProcess(), &duplicated, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
         DWORD err = GetLastError();
-        std::cerr << "[virtual_interface] call.end DuplicateHandle failed err=" << err
-                  << " (fallback: continue without async wait handle)" << std::endl;
+        if (logger_) logger_->warn(std::string("[vif] stage=wintun.wait_event status=failed detail=duplicate err=") + std::to_string(err));
         duplicated = NULL;
     } else {
-        std::cerr << "[virtual_interface] call.end DuplicateHandle ok handle=" << duplicated << std::endl;
+        if (logger_) logger_->info("[vif] stage=wintun.wait_event status=ok detail=duplicated");
     }
 
     // 注意：asio::windows::object_handle 在部分环境下构造/assign 存在兼容性问题，
     // 先不绑定 wrapper，避免影响 VIF 主流程。
     wintun_wait_event_ = duplicated;
     if (wintun_wait_event_) {
-        std::cerr << "[virtual_interface] wintun wait event captured (wrapper binding skipped)" << std::endl;
+        if (logger_) logger_->info("[vif] stage=wintun.wait_event status=ok detail=skipped_wrapper");
     }
 
     wintun_adapter_ = adapter;
@@ -1060,14 +1076,27 @@ public:
     explicit LinuxVirtualInterface(asio::io_context& io_context)
         : io_context_(io_context), stream_descriptor_(io_context) {}
 
+    void set_logger(std::shared_ptr<logging::Logger> logger) override {
+        logger_ = std::move(logger);
+    }
+
+    void set_zero_copy_enabled(bool enabled) override {
+        zero_copy_enabled_.store(enabled, std::memory_order_relaxed);
+    }
+
     std::error_code open(const std::string& name,
                          [[maybe_unused]] const std::string& address,
                          [[maybe_unused]] const std::string& netmask) override {
         name_ = name;
-        
+        zero_copy_reason_.clear();
+
+        if (logger_) logger_->info("[vif] stage=open status=begin detail=linux_tun");
+
         // 打开 TUN 设备
         int fd = ::open("/dev/net/tun", O_RDWR);
         if (fd < 0) {
+            zero_copy_reason_ = "open_tun_failed";
+            if (logger_) logger_->error("[vif] stage=open status=failed detail=open_tun errno=" + std::to_string(errno));
             return std::error_code(errno, std::system_category());
         }
 
@@ -1080,17 +1109,20 @@ public:
 
         if (::ioctl(fd, TUNSETIFF, static_cast<void*>(&ifr)) < 0) {
             ::close(fd);
+            zero_copy_reason_ = "tun_ioctl_failed";
+            if (logger_) logger_->error("[vif] stage=open status=failed detail=tun_ioctl errno=" + std::to_string(errno));
             return std::error_code(errno, std::system_category());
         }
 
         name_ = ifr.ifr_name;
         stream_descriptor_.assign(fd);
-        
-        std::cout << "[virtual_interface] opened linux interface: " << name_ << std::endl;
-        
-        // TODO: 配置 IP 地址和路由 (通常需要 root 权限或 netlink 交互)
-        // 这里假设外部脚本已配置好，或者后续添加 Netlink 代码
-        
+
+        if (zero_copy_enabled_.load(std::memory_order_relaxed)) {
+            init_zerocopy_resources();
+        }
+
+        if (logger_) logger_->info(std::string("[vif] stage=open status=ok detail=name=") + name_);
+
         return {};
     }
 
@@ -1098,7 +1130,9 @@ public:
         if (stream_descriptor_.is_open()) {
             stream_descriptor_.close();
         }
-        std::cout << "[virtual_interface] closing linux interface" << std::endl;
+        write_queue_.clear();
+        teardown_zerocopy_resources();
+        if (logger_) logger_->info("[vif] stage=close status=ok detail=linux_tun");
     }
 
     void async_read_packet(std::shared_ptr<clink::core::memory::Block> buffer, 
@@ -1119,17 +1153,66 @@ public:
             });
     }
 
+    void do_write() {
+        if (write_queue_.empty()) {
+            return;
+        }
+        if (!stream_descriptor_.is_open()) {
+            write_queue_.clear();
+            return;
+        }
+
+        auto packet = write_queue_.front();
+        const int tun_fd = stream_descriptor_.native_handle();
+        std::error_code write_ec;
+
+        if (zero_copy_enabled_.load(std::memory_order_relaxed)) {
+            if (!zerocopy_ready_) {
+                init_zerocopy_resources();
+            }
+            if (zerocopy_ready_) {
+                write_ec = write_packet_zerocopy(tun_fd, packet->data(), packet->size());
+                if (write_ec) {
+                    zero_copy_reason_ = "splice_failed";
+                    if (logger_) logger_->warn("[vif] stage=zerocopy.write status=failed detail=splice ec=" + std::to_string(write_ec.value()));
+                } else {
+                    if (logger_) logger_->trace("[vif] stage=zerocopy.write status=ok bytes=" + std::to_string(packet->size()));
+                }
+            }
+        }
+
+        if (!write_ec) {
+            // zero-copy ok
+        } else {
+            const ssize_t written = ::write(tun_fd, packet->data(), packet->size());
+            if (written < 0) {
+                write_ec = std::error_code(errno, std::system_category());
+                if (logger_) logger_->error("[vif] stage=write status=failed detail=write ec=" + std::to_string(write_ec.value()));
+            } else {
+                if (logger_) logger_->trace("[vif] stage=write status=ok bytes=" + std::to_string(packet->size()) + " fallback=true");
+            }
+        }
+
+        write_queue_.pop_front();
+        if (!write_queue_.empty()) {
+            asio::post(io_context_, [this]() { do_write(); });
+        }
+    }
+
     std::error_code write_packet(const uint8_t* data, size_t size) override {
         if (!stream_descriptor_.is_open()) {
             return std::make_error_code(std::errc::not_connected);
         }
-        
-        // 同步写入
-        // 注意：在高并发场景下，这里也应该改为异步
-        ssize_t written = ::write(stream_descriptor_.native_handle(), data, size);
-        if (written < 0) {
-            return std::error_code(errno, std::system_category());
-        }
+
+        auto packet = std::make_shared<std::vector<uint8_t>>(data, data + size);
+        asio::post(io_context_, [this, packet]() {
+            bool write_in_progress = !write_queue_.empty();
+            write_queue_.push_back(packet);
+            if (!write_in_progress) {
+                do_write();
+            }
+        });
+
         return {};
     }
 
@@ -1137,24 +1220,121 @@ public:
     std::string name() const override { return name_; }
 
 private:
+    void init_zerocopy_resources() {
+        if (zerocopy_ready_) {
+            return;
+        }
+
+        if (logger_) logger_->info("[vif] stage=zerocopy.init status=begin");
+
+        teardown_zerocopy_resources();
+
+        if (::pipe(pipe_fds_) != 0) {
+            zero_copy_reason_ = "pipe_create_failed";
+            if (logger_) logger_->error("[vif] stage=zerocopy.init status=failed detail=pipe errno=" + std::to_string(errno));
+            return;
+        }
+
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, socketpair_fds_) != 0) {
+            zero_copy_reason_ = "socketpair_create_failed";
+            if (logger_) logger_->error("[vif] stage=zerocopy.init status=failed detail=socketpair errno=" + std::to_string(errno));
+            teardown_zerocopy_resources();
+            return;
+        }
+
+        zerocopy_ready_ = true;
+        zero_copy_reason_.clear();
+        if (logger_) logger_->info("[vif] stage=zerocopy.init status=ok");
+    }
+
+    void teardown_zerocopy_resources() {
+        if (pipe_fds_[0] >= 0) {
+            ::close(pipe_fds_[0]);
+        }
+        if (pipe_fds_[1] >= 0) {
+            ::close(pipe_fds_[1]);
+        }
+        if (socketpair_fds_[0] >= 0) {
+            ::close(socketpair_fds_[0]);
+        }
+        if (socketpair_fds_[1] >= 0) {
+            ::close(socketpair_fds_[1]);
+        }
+        pipe_fds_[0] = pipe_fds_[1] = -1;
+        socketpair_fds_[0] = socketpair_fds_[1] = -1;
+        zerocopy_ready_ = false;
+        if (logger_) logger_->info("[vif] stage=zerocopy.close status=ok");
+    }
+
+    std::error_code write_packet_zerocopy(int tun_fd, const uint8_t* data, size_t size) {
+        if (!zerocopy_ready_) {
+            return std::make_error_code(std::errc::operation_not_permitted);
+        }
+
+        ssize_t written = ::write(socketpair_fds_[0], data, size);
+        if (written < 0) {
+            return std::error_code(errno, std::system_category());
+        }
+        if (static_cast<size_t>(written) != size) {
+            return std::make_error_code(std::errc::io_error);
+        }
+
+        size_t remaining = size;
+        while (remaining > 0) {
+            ssize_t moved_in = ::splice(socketpair_fds_[1], nullptr, pipe_fds_[1], nullptr, remaining, SPLICE_F_MOVE);
+            if (moved_in < 0) {
+                if (errno == EINTR) continue;
+                return std::error_code(errno, std::system_category());
+            }
+            if (moved_in == 0) {
+                return std::make_error_code(std::errc::io_error);
+            }
+
+            size_t pending = static_cast<size_t>(moved_in);
+            while (pending > 0) {
+                ssize_t moved_out = ::splice(pipe_fds_[0], nullptr, tun_fd, nullptr, pending, SPLICE_F_MOVE);
+                if (moved_out < 0) {
+                    if (errno == EINTR) continue;
+                    return std::error_code(errno, std::system_category());
+                }
+                if (moved_out == 0) {
+                    return std::make_error_code(std::errc::io_error);
+                }
+                pending -= static_cast<size_t>(moved_out);
+                remaining -= static_cast<size_t>(moved_out);
+            }
+        }
+
+        return {};
+    }
+
     asio::io_context& io_context_;
     asio::posix::stream_descriptor stream_descriptor_;
+    std::shared_ptr<logging::Logger> logger_;
     std::string name_;
+    std::atomic<bool> zero_copy_enabled_{true};
+    std::atomic<bool> zerocopy_ready_{false};
+    int pipe_fds_[2]{-1, -1};
+    int socketpair_fds_[2]{-1, -1};
+    std::string zero_copy_reason_;
+    std::deque<std::shared_ptr<std::vector<uint8_t>>> write_queue_;
 };
 #endif
 
 VirtualInterfacePtr create_virtual_interface(asio::io_context& io_context) {
 #ifdef _WIN32
-    std::cerr << "[virtual_interface] create_virtual_interface.begin" << std::endl;
     try {
         auto vif = std::make_unique<WindowsVirtualInterface>(io_context);
-        std::cerr << "[virtual_interface] create_virtual_interface.ok" << std::endl;
         return vif;
     } catch (const std::exception& e) {
-        std::cerr << "[virtual_interface] create failed with exception: " << e.what() << std::endl;
+        if (vif_logger()) {
+            vif_logger()->error(std::string("[vif] stage=create status=failed detail=exception msg=") + e.what());
+        }
         return {};
     } catch (...) {
-        std::cerr << "[virtual_interface] create failed with unknown exception" << std::endl;
+        if (vif_logger()) {
+            vif_logger()->error("[vif] stage=create status=failed detail=unknown");
+        }
         return {};
     }
 #else

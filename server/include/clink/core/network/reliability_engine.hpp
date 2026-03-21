@@ -73,6 +73,8 @@ public:
     void set_rate_limit(size_t bytes_per_second, size_t burst_size);
     void report_corrupted_packet();
 
+    void set_timer_enabled(bool enabled) { timer_enabled_.store(enabled, std::memory_order_relaxed); }
+
     /**
      * @brief 记录收到的字节数
      */
@@ -142,6 +144,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<bool> shutting_down_{false};
+    std::atomic<bool> timer_enabled_{true};
     std::unique_ptr<asio::steady_timer> timer_;
     std::once_flag timer_once_;
 

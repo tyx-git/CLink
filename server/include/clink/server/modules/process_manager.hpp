@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <asio.hpp>
 #include "server/include/clink/core/logging/logger.hpp"
 #include "server/include/clink/core/config/configuration.hpp"
@@ -44,6 +45,7 @@ private:
     std::shared_ptr<clink::core::logging::Logger> logger_;
     std::shared_ptr<clink::core::network::SessionManager> session_manager_;
     
+    std::mutex lifecycle_mutex_;
     std::shared_ptr<clink::server::modules::SocksServer> socks_server_;
     
 #ifdef _WIN32

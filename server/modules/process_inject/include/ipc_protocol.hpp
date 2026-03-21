@@ -15,6 +15,8 @@ namespace clink::hook::ipc {
         Log = 5
     };
 
+    constexpr uint32_t kMaxPacketBody = 4 * 1024 * 1024; // 4MB hard limit
+
     #pragma pack(push, 1)
     struct PacketHeader {
         uint32_t magic = IPC_MAGIC;

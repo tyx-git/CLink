@@ -59,6 +59,9 @@ public:
         temp_buffer.reserve(total_size);
         for (const auto& buf : buffers) {
             const uint8_t* p = static_cast<const uint8_t*>(buf.data());
+            if (buf.size() == 0 || p == nullptr) {
+                continue;
+            }
             temp_buffer.insert(temp_buffer.end(), p, p + buf.size());
         }
         return send(temp_buffer.data(), temp_buffer.size());

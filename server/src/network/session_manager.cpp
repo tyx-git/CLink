@@ -36,7 +36,7 @@ DefaultSessionManager::DefaultSessionManager(asio::io_context& io_context, std::
     }
 
     if (logger_) {
-        logger_->info("[session] telemetry.sample_every=" + std::to_string(telemetry_sample_every_));
+        logger_->info("[session] stage=telemetry status=ok sample_every=" + std::to_string(telemetry_sample_every_));
     }
 }
 
@@ -45,21 +45,21 @@ DefaultSessionManager::~DefaultSessionManager() {
 }
 
 VirtualInterfacePtr DefaultSessionManager::create_interface() {
-    if (logger_) logger_->info(std::string("[session] create_interface.enter enabled=") + (virtual_interface_enabled_ ? "true" : "false"));
+    if (logger_) logger_->info(std::string("[session] stage=vif.create status=begin enabled=") + (virtual_interface_enabled_ ? "true" : "false"));
 
     if (!virtual_interface_enabled_) {
-        if (logger_) logger_->warn("[session] create_interface.skip (virtual interface disabled)");
+        if (logger_) logger_->warn("[session] stage=vif.create status=skipped detail=disabled");
         return nullptr;
     }
 
     auto vif = create_virtual_interface(io_context_);
-    if (logger_) logger_->info(std::string("[session] create_interface.exit ptr=") + (vif ? "non-null" : "null"));
+    if (logger_) logger_->info(std::string("[session] stage=vif.create status=ok detail=ptr=") + (vif ? "non-null" : "null"));
     return vif;
 }
 
 std::error_code DefaultSessionManager::initialize() {
     if (logger_) {
-        logger_->info("[session] initializing session manager");
+        logger_->info("[session] stage=init status=begin");
     }
 
     const std::string if_name = interface_name_;
@@ -67,52 +67,60 @@ std::error_code DefaultSessionManager::initialize() {
     const std::string netmask = interface_netmask_;
 
     if (logger_) {
-        logger_->info("[session] init params if_name='" + if_name + "' address='" + address + "' netmask='" + netmask + "' vif_enabled=" + (virtual_interface_enabled_ ? std::string("true") : std::string("false")));
+        logger_->info("[session] stage=init.params status=ok if_name='" + if_name + "' address='" + address + "' netmask='" + netmask + "' vif_enabled=" + (virtual_interface_enabled_ ? std::string("true") : std::string("false")) + " zerocopy=" + (zero_copy_enabled_ ? std::string("true") : std::string("false")));
     }
 
     virtual_interface_address_ = address;
 
     if (virtual_interface_enabled_) {
         try {
-            if (logger_) logger_->info("[session] creating virtual interface instance");
+            if (logger_) logger_->info("[session] stage=vif.create status=begin detail=instance");
             virtual_interface_ = create_interface();
         } catch (const std::exception& e) {
-            if (logger_) logger_->error(std::string("[session] exception creating virtual interface: ") + e.what());
+            if (logger_) logger_->error(std::string("[session] stage=vif.create status=failed detail=exception msg=") + e.what());
             return std::make_error_code(std::errc::no_such_device);
         } catch (...) {
-            if (logger_) logger_->error("[session] unknown exception creating virtual interface");
+            if (logger_) logger_->error("[session] stage=vif.create status=failed detail=unknown");
             return std::make_error_code(std::errc::no_such_device);
         }
 
         if (!virtual_interface_) {
-            if (logger_) logger_->error("[session] failed to create virtual interface instance");
+            if (logger_) logger_->error("[session] stage=vif.create status=failed detail=null_instance");
             return std::make_error_code(std::errc::no_such_device);
         }
 
-        if (logger_) logger_->info("[session] opening virtual interface");
+        virtual_interface_->set_logger(logger_);
+        if (logger_) logger_->info("[session] stage=vif.open status=begin");
         auto ec = virtual_interface_->open(if_name, address, netmask);
         if (ec) {
-            if (logger_) logger_->error("[session] failed to open virtual interface: value=" + std::to_string(ec.value()) + " message='" + ec.message() + "'");
+            if (logger_) logger_->error("[session] stage=vif.open status=failed value=" + std::to_string(ec.value()) + " message='" + ec.message() + "'");
             virtual_interface_.reset();
             return ec;
         }
 
         if (logger_) {
-            logger_->info("[session] virtual interface opened");
+            logger_->info("[session] stage=vif.open status=ok");
+        }
+
+        virtual_interface_->set_logger(logger_);
+        virtual_interface_->set_zero_copy_enabled(zero_copy_enabled_);
+        if (logger_) {
+            logger_->info(std::string("[session] stage=vif.zerocopy status=ok enabled=") + (zero_copy_enabled_ ? "true" : "false"));
         }
     } else if (logger_) {
-        logger_->warn("[session] virtual interface disabled by configuration");
+        logger_->warn("[session] stage=vif status=skipped detail=disabled");
     }
 
     running_ = true;
-    if (logger_) logger_->info("[session] starting heartbeat and data loops");
+    if (logger_) logger_->info("[session] stage=loops status=begin detail=heartbeat+tun");
     start_heartbeat_timer();
     if (virtual_interface_) {
         start_tun_read();
     } else if (logger_) {
-        logger_->warn("[session] tun read loop skipped (no virtual interface)");
+        logger_->warn("[session] stage=loops status=skipped detail=no_vif");
     }
 
+    if (logger_) logger_->info("[session] stage=init status=ok");
     return {};
 }
 
@@ -149,15 +157,15 @@ void DefaultSessionManager::start_tun_read() {
 
             if (this_ptr->logger_) {
                 if (transient) {
-                    this_ptr->logger_->debug("[session] tun.read transient category=transient value=" +
+                    this_ptr->logger_->debug("[session] stage=tun.read status=retry detail=transient ec=" +
                                              std::to_string(ec.value()) +
-                                             " message='" + ec.message() +
+                                             " msg='" + ec.message() +
                                              "' streak=" + std::to_string(streak) +
                                              " retry_ms=" + std::to_string(retry_ms));
                 } else {
-                    this_ptr->logger_->warn("[session] tun.read error category=non_transient value=" +
+                    this_ptr->logger_->warn("[session] stage=tun.read status=failed detail=non_transient ec=" +
                                             std::to_string(ec.value()) +
-                                            " message='" + ec.message() +
+                                            " msg='" + ec.message() +
                                             "' streak=" + std::to_string(streak) +
                                             " retry_ms=" + std::to_string(retry_ms));
                 }
@@ -201,7 +209,7 @@ void DefaultSessionManager::start_tun_read() {
             }
 
             if (this_ptr->logger_ && ((loop_idx % 128) == 0)) {
-                this_ptr->logger_->debug("[session] tun.read idle-no-session size=" +
+                this_ptr->logger_->debug("[session] stage=tun.read status=idle detail=no_session size=" +
                                          std::to_string(size) +
                                          " loop=" + std::to_string(loop_idx));
             }
@@ -245,7 +253,7 @@ void DefaultSessionManager::start_heartbeat_timer() {
         {
             std::shared_lock lock(this_ptr->sessions_mutex_);
             for (auto& [id, engine] : this_ptr->engines_) {
-                if (this_ptr->logger_) this_ptr->logger_->trace("[session] sending heartbeat to " + id);
+                if (this_ptr->logger_) this_ptr->logger_->trace("[session] stage=heartbeat status=send target=" + id);
                 engine->send_heartbeat();
             }
         }
@@ -265,8 +273,8 @@ void DefaultSessionManager::start_heartbeat_timer() {
                         if (idle_for > this_ptr->session_idle_timeout_) {
                             should_terminate = true;
                             if (this_ptr->logger_) {
-                                this_ptr->logger_->warn("[session] idle timeout reached, terminating session", id,
-                                                        std::chrono::duration_cast<std::chrono::seconds>(idle_for).count());
+                                this_ptr->logger_->warn("[session] stage=session.idle status=terminate id=" + id +
+                                                        " idle_sec=" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(idle_for).count()));
                             }
                         }
                     }
@@ -279,7 +287,7 @@ void DefaultSessionManager::start_heartbeat_timer() {
         }
 
         for (const auto& id : stale_sessions) {
-            if (this_ptr->logger_) this_ptr->logger_->info("[session] terminating stale session: " + id);
+            if (this_ptr->logger_) this_ptr->logger_->info("[session] stage=session.terminate status=begin reason=stale id=" + id);
             this_ptr->terminate_session(id);
         }
 
@@ -290,11 +298,11 @@ void DefaultSessionManager::start_heartbeat_timer() {
 std::error_code DefaultSessionManager::start_listen(TransportListenerPtr listener, const std::string& endpoint) {
     if (!listener) return std::make_error_code(std::errc::invalid_argument);
     
-    if (logger_) logger_->info("[session] starting listener on " + endpoint);
+    if (logger_) logger_->info("[session] stage=listener.start status=begin endpoint=" + endpoint);
 
     auto ec = listener->listen(endpoint);
     if (ec) {
-        if (logger_) logger_->error("[session] failed to start listener on " + endpoint + ": " + ec.message());
+        if (logger_) logger_->error("[session] stage=listener.start status=failed endpoint=" + endpoint + " msg=" + ec.message());
         return ec;
     }
 
@@ -319,7 +327,7 @@ void DefaultSessionManager::create_session(TransportAdapterPtr adapter) {
 void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
     if (!adapter) return;
 
-    if (logger_) logger_->info("[session.stage] new_connection.enter");
+    if (logger_) logger_->info("[session] stage=connection status=begin");
 
     try {
         auto tracer = observability::Telemetry::get_tracer("clink-network");
@@ -391,6 +399,11 @@ void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
         throw;
     }
     if (logger_) logger_->info("[session.stage] reliability_engine.create.ok session_id=" + session_id + " ptr=" + std::to_string(reinterpret_cast<uintptr_t>(engine.get())));
+
+    engine->set_timer_enabled(reliability_timer_enabled_);
+    if (logger_ && !reliability_timer_enabled_) {
+        logger_->warn("[session.stage] reliability_engine.timer.disabled session_id=" + session_id);
+    }
 
     if (default_bytes_per_second_ > 0) {
         if (logger_) logger_->info("[session.stage] reliability_engine.rate_limit.set session_id=" + session_id);
@@ -737,8 +750,8 @@ void DefaultSessionManager::shutdown() {
     if (!running_.exchange(false)) return;
 
     if (logger_) {
-        logger_->info("[session] shutting down session manager");
-        logger_->info("[session] tun.read.loop.stop_requested");
+        logger_->info("[session] stage=shutdown status=begin");
+        logger_->info("[session] stage=tun.read.loop status=stop_requested");
     }
 
     heartbeat_timer_.cancel();
@@ -793,7 +806,8 @@ void DefaultSessionManager::shutdown() {
     }
 
     if (logger_) {
-        logger_->info("[session] tun.read.loop.stopped");
+        logger_->info("[session] stage=tun.read.loop status=stopped");
+        logger_->info("[session] stage=shutdown status=ok");
     }
 }
 

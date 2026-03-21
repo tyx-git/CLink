@@ -92,6 +92,7 @@ ProcessManager::~ProcessManager() {
 }
 
 bool ProcessManager::start(const clink::core::config::Configuration& config) {
+    std::lock_guard<std::mutex> guard(lifecycle_mutex_);
     if (running_) return true;
 
     socks_available_ = false;
@@ -309,6 +310,14 @@ bool ProcessManager::start(const clink::core::config::Configuration& config) {
 
             auto key = std::make_pair(static_cast<void*>(conn.get()), header.socket_id);
 
+            if (header.length > clink::hook::ipc::kMaxPacketBody) {
+                session_state->unknown_packets.fetch_add(1, std::memory_order_relaxed);
+                if (logger_) {
+                    logger_->warn("IPC packet drop: body too large", header.length);
+                }
+                return;
+            }
+
             if (logger_) {
                 logger_->debug("IPC packet received type socket body_len",
                                static_cast<int>(header.type),
@@ -425,9 +434,23 @@ bool ProcessManager::start(const clink::core::config::Configuration& config) {
                     state->sessions.erase(erase_key);
                 });
 
+                bool inserted = false;
                 {
                     std::lock_guard<std::mutex> lock(session_state->mutex);
-                    session_state->sessions[key] = session;
+                    auto [it, did_insert] = session_state->sessions.emplace(key, session);
+                    inserted = did_insert;
+                    if (!did_insert) {
+                        if (logger_) {
+                            logger_->warn("IPC session already exists, closing previous", header.socket_id);
+                        }
+                        auto prev_session = it->second;
+                        it->second = session;
+                        if (prev_session) {
+                            prev_session->set_close_handler(nullptr);
+                            prev_session->close();
+                        }
+                    }
+
                     if (logger_) {
                         logger_->debug("IPC session created conn sid active",
                                        reinterpret_cast<uintptr_t>(conn.get()),
@@ -440,6 +463,7 @@ bool ProcessManager::start(const clink::core::config::Configuration& config) {
                            !session_state->active_sessions_peak.compare_exchange_weak(peak, active_now, std::memory_order_relaxed)) {
                     }
                 }
+
                 session->start(host, port);
             } else if (header.type == clink::hook::ipc::PacketType::Disconnect) {
                 session_state->packets_total.fetch_add(1, std::memory_order_relaxed);
@@ -510,7 +534,10 @@ bool ProcessManager::start(const clink::core::config::Configuration& config) {
 
             // Close sessions outside the lock to avoid deadlock with close_handler
             for (auto& session : sessions_to_close) {
-                session->close();
+                if (session) {
+                    session->set_close_handler(nullptr);
+                    session->close();
+                }
             }
         });
 
@@ -573,6 +600,7 @@ bool ProcessManager::start(const clink::core::config::Configuration& config) {
 }
 
 void ProcessManager::stop() {
+    std::lock_guard<std::mutex> guard(lifecycle_mutex_);
     if (!running_ && !socks_server_
 #ifdef _WIN32
         && !ipc_server_

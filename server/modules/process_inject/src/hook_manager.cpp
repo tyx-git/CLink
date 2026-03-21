@@ -79,15 +79,19 @@ bool HookManager::initialize() {
 void HookManager::shutdown() {
     if (!initialized_) return;
 
+    stop_read_loop();
+
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
 
-    std::lock_guard<std::mutex> lock(pipe_mutex_);
-    if (pipe_handle_ != INVALID_HANDLE_VALUE) {
-        CloseHandle(pipe_handle_);
-        pipe_handle_ = INVALID_HANDLE_VALUE;
+    {
+        std::lock_guard<std::mutex> lock(pipe_mutex_);
+        if (pipe_handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(pipe_handle_);
+            pipe_handle_ = INVALID_HANDLE_VALUE;
+        }
+        ipc_connected_ = false;
     }
-    ipc_connected_ = false;
 
     initialized_ = false;
 }
@@ -120,7 +124,6 @@ void HookManager::connect_ipc() {
             // Start read loop
             stop_read_thread_ = false;
             read_thread_ = std::thread([this]() { read_loop(); });
-            read_thread_.detach(); // Detach for now as we don't have clean shutdown
             
             break;
         }
@@ -138,69 +141,86 @@ void HookManager::connect_ipc() {
 }
 
 void HookManager::read_loop() {
-    while (!stop_read_thread_) {
+    while (!stop_read_thread_.load(std::memory_order_relaxed)) {
         ipc::PacketHeader header;
-        DWORD read;
+        DWORD read = 0;
         DWORD bytesAvail = 0;
 
+        HANDLE pipe = INVALID_HANDLE_VALUE;
+        {
+            std::lock_guard<std::mutex> lock(pipe_mutex_);
+            pipe = pipe_handle_;
+        }
+        if (pipe == INVALID_HANDLE_VALUE) {
+            Sleep(10);
+            continue;
+        }
+
         // Use PeekNamedPipe to check for data availability
-        // This avoids blocking on ReadFile which would prevent WriteFile from proceeding
-        // on the same synchronous handle.
-        if (!PeekNamedPipe(pipe_handle_, NULL, 0, NULL, &bytesAvail, NULL)) {
+        if (!PeekNamedPipe(pipe, NULL, 0, NULL, &bytesAvail, NULL)) {
             if (GetLastError() == ERROR_BROKEN_PIPE) {
                 break;
             }
-            // Other error, maybe pipe closed
             log_error("PeekNamedPipe failed: " + std::to_string(GetLastError()));
             break;
         }
 
         if (bytesAvail < sizeof(header)) {
-            // Not enough data for header, sleep and retry
             Sleep(10);
             continue;
         }
-        
-        // Read header
-        if (!ReadFile(pipe_handle_, &header, sizeof(header), &read, NULL)) {
+
+        if (!ReadFile(pipe, &header, sizeof(header), &read, NULL)) {
             if (GetLastError() != ERROR_BROKEN_PIPE) {
                 log_error("ReadFile failed: " + std::to_string(GetLastError()));
             }
             break;
         }
-        
+
         if (read == 0) continue;
-        
+
         if (header.magic != ipc::IPC_MAGIC) {
             log_error("Invalid magic");
             break;
         }
-        
-        // Read body
+
+        if (header.length > ipc::kMaxPacketBody) {
+            log_error("IPC body too large: " + std::to_string(header.length));
+            break;
+        }
+
         std::vector<char> body;
         if (header.length > 0) {
-            // Wait for body data
             while (true) {
-                if (!PeekNamedPipe(pipe_handle_, NULL, 0, NULL, &bytesAvail, NULL)) {
+                if (!PeekNamedPipe(pipe, NULL, 0, NULL, &bytesAvail, NULL)) {
                      break;
                 }
                 if (bytesAvail >= header.length) break;
                 Sleep(1);
+                if (stop_read_thread_.load(std::memory_order_relaxed)) {
+                    return;
+                }
             }
-            
+
             body.resize(header.length);
-            if (!ReadFile(pipe_handle_, body.data(), header.length, &read, NULL)) {
+            if (!ReadFile(pipe, body.data(), header.length, &read, NULL)) {
                 log_error("ReadFile body failed");
                 break;
             }
         }
-        
+
         if (header.type == ipc::PacketType::DataRecv) {
             std::lock_guard<std::mutex> lock(injection_mutex_);
             auto& buffer = injection_buffers_[header.socket_id];
             buffer.insert(buffer.end(), body.begin(), body.end());
-            // log_error("Injected " + std::to_string(body.size()) + " bytes for socket " + std::to_string(header.socket_id));
         }
+    }
+}
+
+void HookManager::stop_read_loop() {
+    stop_read_thread_.store(true, std::memory_order_relaxed);
+    if (read_thread_.joinable()) {
+        read_thread_.join();
     }
 }
 
@@ -215,6 +235,11 @@ void HookManager::send_ipc_message(uint8_t type, uint64_t socket_id, const void*
     header.magic = ipc::IPC_MAGIC;
     header.type = static_cast<ipc::PacketType>(type);
     header.socket_id = socket_id;
+    if (size > ipc::kMaxPacketBody) {
+        log_error("IPC send drop: payload too large " + std::to_string(size));
+        return;
+    }
+
     header.length = static_cast<uint32_t>(size);
 
     DWORD written;

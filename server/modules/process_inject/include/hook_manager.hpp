@@ -37,6 +37,7 @@ private:
 
     void connect_ipc();
     void read_loop();
+    void stop_read_loop();
     void send_ipc_message(uint8_t type, uint64_t socket_id, const void* data, size_t size);
     
     // Helper to format error message

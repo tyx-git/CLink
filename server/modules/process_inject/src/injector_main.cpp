@@ -160,12 +160,14 @@ bool InjectDLL(DWORD processId, const std::string& dllPath) {
     log_inject("CreateRemoteThread ok");
 
     const DWORD wait_rc = WaitForSingleObject(hThread, 15000);
+    bool wait_ok = false;
     if (wait_rc == WAIT_TIMEOUT) {
         log_inject_error("WaitForSingleObject timeout (15s)");
     } else if (wait_rc == WAIT_FAILED) {
         const DWORD err = GetLastError();
         log_inject_error("WaitForSingleObject failed err=" + format_last_error(err));
     } else {
+        wait_ok = true;
         log_inject("WaitForSingleObject completed rc=" + std::to_string(wait_rc));
     }
 
@@ -186,7 +188,7 @@ bool InjectDLL(DWORD processId, const std::string& dllPath) {
 
     CloseHandle(hProcess);
 
-    const bool ok = (exitCode != 0);
+    const bool ok = wait_ok && (exitCode != 0);
     log_inject(std::string("end result=") + (ok ? "success" : "failed"));
     return ok;
 }
