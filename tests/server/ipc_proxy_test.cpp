@@ -3,9 +3,9 @@
 #include <thread>
 #include <future>
 #include <iostream>
-#include "clink/server/modules/process_manager.hpp"
-#include "clink/server/modules/ipc_proxy_session.hpp"
-#include "process_ipc_server.hpp"
+#include "src/server/modules/process_manager/process_manager.hpp"
+#include "src/server/modules/process_manager/ipc_proxy_session.hpp"
+#include "src/server/modules/process_inject/include/process_ipc_server.hpp"
 
 using namespace clink::server::modules;
 using namespace clink::hook;

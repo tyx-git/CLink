@@ -7,7 +7,7 @@
 #include <thread>
 #include <atomic>
 
-#include "ipc_protocol.hpp"
+#include "src/client/modules/process_inject/include/ipc_protocol.hpp"
 
 namespace ipc = clink::hook::ipc;
 

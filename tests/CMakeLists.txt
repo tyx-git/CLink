@@ -17,11 +17,6 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
             Catch2::Catch2WithMain
     )
 
-    target_include_directories(clink-logging-tests
-        PRIVATE
-            ${CMAKE_SOURCE_DIR}/include
-    )
-
     set_project_options(clink-logging-tests)
 
     add_test(NAME clink-logging-tests COMMAND clink-logging-tests)
@@ -55,13 +50,6 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
         target_link_libraries(clink-network-tests-v2 PRIVATE clink-process-server)
     endif()
 
-    target_include_directories(clink-network-tests-v2
-        PRIVATE
-            ${CMAKE_SOURCE_DIR}/include
-            ${CMAKE_SOURCE_DIR}/server/include
-            ${CMAKE_SOURCE_DIR}/modules/process_inject/include
-    )
-
     set_project_options(clink-network-tests-v2)
 
     add_test(NAME clink-network-tests-v2 COMMAND clink-network-tests-v2)
@@ -79,11 +67,6 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
             Catch2::Catch2WithMain
     )
 
-    target_include_directories(clink-logging-perf-tests
-        PRIVATE
-            ${CMAKE_SOURCE_DIR}/include
-    )
-    
     set_project_options(clink-logging-perf-tests)
 
     # Performance tests are not run by default with ctest
@@ -102,11 +85,5 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
             clink::core
     )
 
-    target_include_directories(clink-network-perf-tests
-        PRIVATE
-            ${CMAKE_SOURCE_DIR}/include
-            ${CMAKE_SOURCE_DIR}/server/include
-    )
-    
     set_project_options(clink-network-perf-tests)
 endif()

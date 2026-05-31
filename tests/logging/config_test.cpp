@@ -2,8 +2,8 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <sstream>
 
-#include "clink/core/logging/config.hpp"
-#include "clink/core/config/configuration.hpp"
+#include "src/share/core/logging/config.hpp"
+#include "src/share/core/config/configuration.hpp"
 
 TEST_CASE("LogConfig from TOML", "[logging][config]") {
     using namespace clink::core;

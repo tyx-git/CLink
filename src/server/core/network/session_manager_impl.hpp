@@ -1,0 +1,108 @@
+#pragma once
+
+#include "src/server/core/network/session_manager.hpp"
+#include "src/server/core/network/virtual_interface.hpp"
+#include "src/share/core/logging/logger.hpp"
+#include "src/server/core/network/reliability_engine.hpp"
+#include "src/server/core/network/acl.hpp"
+#include <asio.hpp>
+#include <mutex>
+#include <atomic>
+#include <thread>
+
+namespace clink::core::network {
+
+/**
+ * @brief 会话管理器的默认实现
+ */
+class DefaultSessionManager : public SessionManager {
+public:
+    explicit DefaultSessionManager(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger);
+    ~DefaultSessionManager() override;
+
+    std::error_code initialize() override;
+    std::error_code start_listen(TransportListenerPtr listener, const std::string& endpoint) override;
+    void create_session(TransportAdapterPtr adapter) override;
+    void handle_new_connection(TransportAdapterPtr adapter) override;
+    void add_listener(TransportListenerPtr listener) override;
+    void terminate_session(const std::string& session_id) override;
+    std::vector<SessionContext> get_active_sessions() const override;
+    std::string get_virtual_interface_address() const override;
+    std::error_code route_packet(const uint8_t* data, size_t size) override;
+    void broadcast(const uint8_t* data, size_t size) override;
+    void shutdown() override;
+
+    void set_default_rate_limit(size_t bytes_per_second, size_t burst_size) override {
+        default_bytes_per_second_ = bytes_per_second;
+        default_burst_size_ = burst_size;
+    }
+
+    void set_virtual_interface_config(std::string name, std::string address, std::string netmask) {
+        interface_name_ = std::move(name);
+        interface_address_ = std::move(address);
+        interface_netmask_ = std::move(netmask);
+    }
+
+    void set_virtual_interface_enabled(bool enabled) {
+        virtual_interface_enabled_ = enabled;
+    }
+
+    void set_zero_copy_enabled(bool enabled) {
+        zero_copy_enabled_ = enabled;
+    }
+
+    void set_acl(std::shared_ptr<AccessControlList> acl) { acl_ = std::move(acl); }
+    void set_policy_engine(std::shared_ptr<policy::PolicyEngine> engine) { policy_engine_ = std::move(engine); }
+    void set_session_event_callback(SessionEventCallback cb) override { session_event_cb_ = std::move(cb); }
+    void set_session_idle_timeout(std::chrono::seconds timeout) override { session_idle_timeout_ = timeout; }
+    void set_reliability_timer_enabled(bool enabled) { reliability_timer_enabled_ = enabled; }
+    void reset_listeners();
+
+protected:
+    virtual VirtualInterfacePtr create_interface();
+
+private:
+    void start_heartbeat_timer();
+    void start_tun_read();
+
+    asio::io_context& io_context_;
+    std::shared_ptr<logging::Logger> logger_;
+    mutable std::shared_mutex sessions_mutex_;
+    std::unordered_map<std::string, SessionContext> sessions_;
+    std::unordered_map<std::string, TransportAdapterPtr> adapters_;
+    std::unordered_map<std::string, std::shared_ptr<ReliabilityEngine>> engines_;
+    std::unordered_map<std::string, std::vector<uint8_t>> pending_receive_buffers_;
+    std::vector<TransportListenerPtr> listeners_;
+    std::shared_ptr<AccessControlList> acl_;
+    std::shared_ptr<policy::PolicyEngine> policy_engine_;
+    SessionEventCallback session_event_cb_;
+    
+    size_t default_bytes_per_second_{0};
+    size_t default_burst_size_{0};
+
+    VirtualInterfacePtr virtual_interface_;
+    std::string virtual_interface_address_;
+    std::atomic<bool> running_{false};
+    std::string interface_name_{"clink0"};
+    std::string interface_address_{"10.8.0.1"};
+    std::string interface_netmask_{"255.255.255.0"};
+    bool virtual_interface_enabled_{true};
+    bool zero_copy_enabled_{true};
+    std::chrono::seconds session_idle_timeout_{std::chrono::seconds(0)};
+    bool reliability_timer_enabled_{true};
+
+    std::atomic<uint32_t> tun_read_error_streak_{0};
+    std::atomic<uint64_t> tun_read_loop_counter_{0};
+    std::atomic<uint64_t> network_to_tun_counter_{0};
+    uint32_t telemetry_sample_every_{64};
+
+    asio::steady_timer heartbeat_timer_;
+    asio::steady_timer tun_retry_timer_;
+};
+
+/**
+ * @brief 工厂函数，创建 SessionManager 实例
+ */
+std::shared_ptr<SessionManager> create_session_manager(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger);
+
+}  // namespace clink::core::network

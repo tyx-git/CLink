@@ -1,0 +1,68 @@
+# Debug Client A Config — Windows local daemon (v1.3.0)
+
+[service]
+role = "service"
+
+[network]
+listen_endpoint = "tcp://127.0.0.1:4451"
+allow_self_connect_for_debug = true
+allow_self_connect = true
+bandwidth_limit = 0
+virtual_interface.enabled = false
+
+[security]
+credential_provider = "psk"
+
+[observability]
+log_level = "trace"
+
+[logging]
+level = "trace"
+format = "simple"
+pattern = "%Y-%m-%d %H:%M:%S.%e [%n] [%l] %v"
+async = true
+queue_size = 8192
+flush_interval = 1
+
+[auth]
+psk_list = ["admin:AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAA4CF8PNDkO0WHzf0q2J69zwAAAAAeAAAAQwBMAGkAbgBrACAAUwBlAGMAdQByAGkAdAB5AAAAEGYAAAABAAAgAAAA14dtsN2TEHHHwpvQoXd8itD/+Q1/ZDA/AdmwVzE8tMgAAAAADoAAAAACAAAgAAAAWPdDhc60sCtR21rH9ajl5hnjzp7N2pI+dTVw/8hfM/YgAAAAy1MdyPbHQtpyn7TlE4MNBCqzEWaLrqfuLGsU84SrCBFAAAAAkl94EFM/wFkZR1Yl9VXutwN6FoZHHsqEK7Hl7tMqI0QUaE5WvdtpMwBWzRFm0DWkuHHS2xFFmgp5Ns7a0yYQuw=="]
+
+[client]
+remote_endpoint = "tcp://127.0.0.1:4433"
+
+[policy.global]
+max_bandwidth_up = 0
+max_bandwidth_down = 0
+session_timeout = 0
+allow_split_tunneling = true
+allowed_subnets = ["0.0.0.0/0"]
+
+[process_manager]
+enabled = true
+
+[socks]
+enabled = true
+backend = "auto"
+bind_address = "127.0.0.1"
+bind_port = 1081
+
+[[logging.sinks]]
+type = "console"
+enabled = true
+level = "trace"
+
+[[logging.sinks]]
+type = "rotating"
+enabled = true
+level = "trace"
+path = "logs/debug-client-a.log"
+max_size = "10MB"
+max_files = 3
+[ipc]
+address = '\\.\pipe\clink-ipc-debug-a'
+
+[process.inject]
+# Set by launch script after finding java.exe PID
+target_pid = 0
+# Path to the hook DLL  
+dll = "D:\\Project\\CLink\\Out\\clink-client-hook.dll"

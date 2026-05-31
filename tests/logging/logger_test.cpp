@@ -4,9 +4,9 @@
 #include <fstream>
 #include <filesystem>
 
-#include "clink/core/logging/logger.hpp"
-#include "clink/core/logging/config.hpp"
-#include "clink/core/config/configuration.hpp"
+#include "src/share/core/logging/logger.hpp"
+#include "src/share/core/logging/config.hpp"
+#include "src/share/core/config/configuration.hpp"
 
 TEST_CASE("Logger API Compatibility", "[logging]") {
     auto logger = std::make_shared<clink::core::logging::Logger>("test-logger");

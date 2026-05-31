@@ -28,3 +28,10 @@ docs/
 # Misc
 .DS_Store
 Thumbs.db
+.claude/
+.software
+CLAUDE.md
+findings.md
+give.md
+progress.md
+task_plan.md

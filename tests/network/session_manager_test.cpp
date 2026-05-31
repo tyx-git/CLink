@@ -1,8 +1,8 @@
 #include <catch2/catch_all.hpp>
-#include "clink/core/network/session_manager_impl.hpp"
-#include "clink/core/network/transport_adapter.hpp"
-#include "clink/core/logging/logger.hpp"
-#include "clink/core/memory/buffer_pool.hpp"
+#include "src/server/core/network/session_manager_impl.hpp"
+#include "src/server/core/network/transport_adapter.hpp"
+#include "src/share/core/logging/logger.hpp"
+#include "src/server/core/memory/buffer_pool.hpp"
 #include <deque>
 
 using namespace clink::core::network;
@@ -149,6 +149,55 @@ TEST_CASE("SessionManager Integration Test", "[network][session]") {
         REQUIRE(ack_packet != nullptr);
         CHECK(static_cast<PacketType>(ack_packet->header.type) == PacketType::Ack);
         CHECK(ack_packet->header.ack_num == 1);
+    }
+
+    SECTION("Fragmented network packet is reassembled before routing") {
+        auto block = clink::core::memory::BufferPool::instance()->acquire(4);
+        block->append(reinterpret_cast<const uint8_t*>("\x05\x06\x07\x08"), 4);
+
+        Packet packet(block);
+        packet.header.type = static_cast<uint8_t>(PacketType::Data);
+        packet.header.seq_num = 2;
+        packet.header.ack_num = 0;
+
+        auto raw = packet.serialize();
+        std::vector<uint8_t> first(raw.begin(), raw.begin() + 6);
+        std::vector<uint8_t> second(raw.begin() + 6, raw.end());
+
+        adapter->simulate_receive(first);
+        CHECK(session_manager->mock_vif_raw_->written_packets_.empty());
+        CHECK(adapter->sent_data_.empty());
+
+        adapter->simulate_receive(second);
+
+        REQUIRE(session_manager->mock_vif_raw_->written_packets_.size() == 1);
+        std::vector<uint8_t> expected_payload = {0x05, 0x06, 0x07, 0x08};
+        CHECK(session_manager->mock_vif_raw_->written_packets_[0] == expected_payload);
+
+        REQUIRE(adapter->sent_data_.size() == 1);
+        auto ack_raw = adapter->sent_data_[0];
+        auto ack_packet = Packet::deserialize(ack_raw.data(), ack_raw.size());
+        REQUIRE(ack_packet != nullptr);
+        CHECK(static_cast<PacketType>(ack_packet->header.type) == PacketType::Ack);
+        CHECK(ack_packet->header.ack_num == 2);
+    }
+
+    SECTION("Receive heartbeat from network -> reply ACK") {
+        Packet packet;
+        packet.header.type = static_cast<uint8_t>(PacketType::Heartbeat);
+        packet.header.seq_num = 7;
+        packet.header.ack_num = 0;
+
+        auto raw = packet.serialize();
+        adapter->simulate_receive(raw);
+
+        REQUIRE(adapter->sent_data_.size() == 1);
+        auto ack_raw = adapter->sent_data_[0];
+        auto ack_packet = Packet::deserialize(ack_raw.data(), ack_raw.size());
+        REQUIRE(ack_packet != nullptr);
+        CHECK(static_cast<PacketType>(ack_packet->header.type) == PacketType::Ack);
+        CHECK(ack_packet->header.ack_num == 7);
+        CHECK(session_manager->mock_vif_raw_->written_packets_.empty());
     }
 
     SECTION("Receive data from TUN -> route to network") {

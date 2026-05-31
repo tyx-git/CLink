@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
-#include "clink/server/modules/socks_server.hpp"
-#include "clink/core/logging/logger.hpp"
+#include "src/server/modules/socks_server/socks_server.hpp"
+#include "src/share/core/logging/logger.hpp"
 #include <asio.hpp>
 #include <thread>
 #include <future>
