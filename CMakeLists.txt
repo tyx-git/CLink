@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CLINK VERSION 1.2.1 LANGUAGES CXX)
+project(CLINK VERSION 1.3.0 LANGUAGES CXX)
 
 option(CLINK_ENABLE_TESTS "Enable tests" ON)
 
@@ -170,9 +170,9 @@ if(WIN32 AND CLINK_BUILD_CLIENT_HOOK)
 endif()
 
 # Process Injection Module
-add_subdirectory(server/modules/process_inject)
+add_subdirectory(src/server/modules/process_inject)
 if(WIN32 AND CLINK_BUILD_CLIENT_HOOK)
-    add_subdirectory(client/modules/process_inject)
+    add_subdirectory(src/client/modules/process_inject)
 endif()
 
 add_subdirectory(src)

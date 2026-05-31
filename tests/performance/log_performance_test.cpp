@@ -9,8 +9,8 @@
 #include <sstream>
 #include <filesystem>
 
-#include "clink/core/logging/logger.hpp"
-#include "clink/core/logging/config.hpp"
+#include "src/share/core/logging/logger.hpp"
+#include "src/share/core/logging/config.hpp"
 
 // 简单的性能计时器
 class Timer {

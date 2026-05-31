@@ -8,9 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
-#include "clink/core/network/tls_adapter.hpp"
-#include "clink/core/network/packet.hpp"
-#include "clink/core/logging/logger.hpp"
+#include "src/server/core/network/tls_adapter.hpp"
+#include "src/share/core/network/packet.hpp"
+#include "src/share/core/logging/logger.hpp"
 #include <asio.hpp>
 
 #ifdef _WIN32

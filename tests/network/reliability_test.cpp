@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
-#include "clink/core/network/reliability_engine.hpp"
-#include "clink/core/network/packet.hpp"
-#include "clink/core/memory/buffer_pool.hpp"
+#include "src/server/core/network/reliability_engine.hpp"
+#include "src/share/core/network/packet.hpp"
+#include "src/server/core/memory/buffer_pool.hpp"
 #include <iostream>
 #include <vector>
 #include <memory>
@@ -158,6 +158,26 @@ TEST_CASE("ReliabilityEngine SACK and Congestion Control", "[network][reliabilit
         engine->process_ack(2);
         stats = engine->get_stats();
         CHECK(stats.cwnd == initial_cwnd + 2);
+    }
+
+    SECTION("Queued packets are released by in-flight window") {
+        for (int i = 0; i < 12; ++i) {
+            engine->send_reliable(PacketType::Data, make_block({static_cast<uint8_t>(i)}));
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(sent_mutex);
+            REQUIRE(sent_packets.size() == 10);
+            sent_packets.clear();
+        }
+
+        engine->process_ack(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        {
+            std::lock_guard<std::mutex> lock(sent_mutex);
+            CHECK(sent_packets.size() == 2);
+        }
     }
 
     SECTION("Fast Retransmit and Fast Recovery") {

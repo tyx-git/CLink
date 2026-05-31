@@ -1,8 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
-#include "clink/core/network/session_manager_impl.hpp"
-#include "clink/core/network/transport_adapter.hpp"
-#include "clink/core/logging/logger.hpp"
-#include "clink/core/memory/buffer_pool.hpp"
+#include "src/server/core/network/session_manager_impl.hpp"
+#include "src/server/core/network/transport_adapter.hpp"
+#include "src/share/core/logging/logger.hpp"
+#include "src/server/core/memory/buffer_pool.hpp"
 #include <iostream>
 #include <cstring>
 
