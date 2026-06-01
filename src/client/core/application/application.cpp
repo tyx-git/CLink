@@ -372,15 +372,20 @@ void Application::connect_session() {
 #endif
 
             try {
-                if (!configuration_.contains("transport.server_endpoint")) {
-                    logger_->error("transport.server_endpoint not configured");
+                std::string server_endpoint;
+                if (configuration_.contains("transport.server_endpoint")) {
+                    server_endpoint = configuration_.get_string("transport.server_endpoint");
+                } else if (configuration_.contains("client.remote_endpoint")) {
+                    server_endpoint = configuration_.get_string("client.remote_endpoint");
+                    logger_->info("Using client.remote_endpoint as server endpoint (consider setting transport.server_endpoint)");
+                } else {
+                    logger_->error("No server endpoint configured (need transport.server_endpoint or client.remote_endpoint)");
                     update_connect_status(control_plane::kStatusFailed,
                                           control_plane::kReasonMissingEndpoint,
-                                          "transport.server_endpoint not configured");
+                                          "No server endpoint configured");
                     session_state_ = SessionState::Disconnected;
                     return;
                 }
-                std::string server_endpoint = configuration_.get_string("transport.server_endpoint");
 
                 logger_->info("Connecting to server via TLS: " + server_endpoint);
 

@@ -1,6 +1,7 @@
 #include "src/client/core/application/application.hpp"
 #include "src/client/core/utils/terminal.hpp"
 #include "src/share/core/config/log_path_utils.hpp"
+#include "src/share/core/security/base64.hpp"
 #include "src/share/include/clink/protocol/control_plane.hpp"
 #include "src/server/core/security/dpapi_helper.hpp"
 #include <nlohmann/json.hpp>
@@ -796,7 +797,7 @@ int handle_encrypt(int argc, char** argv) {
     }
     try {
         auto encrypted = clink::core::security::DpapiHelper::encrypt(secret);
-        auto base64 = clink::core::security::DpapiHelper::to_base64(encrypted);
+        auto base64 = clink::core::security::to_base64(encrypted);
         std::cout << "Encrypted secret (Base64): " << base64 << std::endl;
         std::cout << "Copy this into your config file." << std::endl;
         return 0;

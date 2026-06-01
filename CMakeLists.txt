@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(CLINK VERSION 1.3.4 LANGUAGES CXX)
+project(CLINK VERSION 1.3.5 LANGUAGES CXX)
 
 option(CLINK_ENABLE_TESTS "Enable tests" ON)
 

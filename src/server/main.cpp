@@ -22,7 +22,7 @@ namespace {
 
 std::atomic<clink::core::Application*> g_app_ptr{nullptr};
 std::atomic<int> g_last_signal{0};
-constexpr std::string_view kServerVersion{"1.3.4"};
+constexpr std::string_view kServerVersion{"1.3.5"};
 
 bool has_flag(int argc, char** argv, std::string_view flag) {
     for (int i = 1; i < argc; ++i) {

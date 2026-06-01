@@ -5,7 +5,7 @@ CLink 是一个 **跨平台 daemon + CLI** 的会话隧道项目（Windows / Lin
 - `clink-server`：核心守护进程（数据面 + 控制面）
 - `clink-cli`：本地控制工具（通过 IPC 控制本机 daemon）
 
-> 版本：`1.3.4`  
+> 版本：`1.3.5`  
 > 作者：`TTxyz`
 
 ---
