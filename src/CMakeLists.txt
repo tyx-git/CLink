@@ -7,6 +7,13 @@ add_library(clink-share-core STATIC
     share/core/network/tls_helpers.cpp
 )
 
+# Platform-specific shared IPC implementation
+if (WIN32)
+    target_sources(clink-share-core PRIVATE share/core/ipc/ipc_win.cpp)
+elseif (UNIX AND NOT APPLE)
+    target_sources(clink-share-core PRIVATE share/core/ipc/ipc_linux.cpp)
+endif()
+
 target_include_directories(clink-share-core PUBLIC
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
@@ -57,14 +64,7 @@ add_library(clink-core STATIC
     server/core/observability/telemetry.cpp
 )
 
-# Platform-specific server IPC implementation selection
-if (WIN32)
-    target_sources(clink-core PRIVATE server/core/ipc/ipc_win.cpp)
-elseif (UNIX AND NOT APPLE)
-    target_sources(clink-core PRIVATE server/core/ipc/ipc_linux.cpp)
-else()
-    message(FATAL_ERROR "Unsupported platform for clink-core IPC implementation")
-endif()
+# IPC implementation is now in clink-share-core
 
 target_include_directories(clink-core PUBLIC
     ${CMAKE_SOURCE_DIR}
@@ -124,14 +124,7 @@ add_library(clink-client-core STATIC
     client/core/network/tls_adapter.cpp
 )
 
-# Platform-specific IPC implementation selection
-if (WIN32)
-    target_sources(clink-client-core PRIVATE client/core/ipc/ipc_win.cpp)
-elseif (UNIX AND NOT APPLE)
-    target_sources(clink-client-core PRIVATE client/core/ipc/ipc_linux.cpp)
-else()
-    message(FATAL_ERROR "Unsupported platform for clink-client-core IPC implementation")
-endif()
+# IPC implementation is now in clink-share-core
 
 target_include_directories(clink-client-core PUBLIC
     ${CMAKE_SOURCE_DIR}

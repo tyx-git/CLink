@@ -11,7 +11,7 @@
 #include "src/share/core/config/configuration.hpp"
 #include "src/share/core/logging/logger.hpp"
 #include "src/server/core/registry.hpp"
-#include "src/server/core/ipc/ipc.hpp"
+#include "src/share/core/ipc/ipc.hpp"
 #include "src/server/core/network/session_manager.hpp"
 #include "src/server/core/security/auth.hpp"
 #include "src/server/core/policy/engine.hpp"

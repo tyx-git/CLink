@@ -248,7 +248,7 @@ void Application::initialize() {
 
         if (!ipc_server_ && options_.role == "service") {
             logger_->info("[init] stage=ipc_server.prepare_default.begin");
-            ipc_server_ = ipc::create_server(logger_);
+            ipc_server_ = ipc::create_server(io_context_, logger_);
             logger_->info("[init] stage=ipc_server.prepare_default.ok");
         }
 
@@ -993,7 +993,7 @@ void Application::stop_modules() {
 
 void Application::start_ipc_server(const std::string& address) {
     if (!ipc_server_) {
-        ipc_server_ = ipc::create_server(logger_);
+        ipc_server_ = ipc::create_server(io_context_, logger_);
     }
     
     setup_ipc_handlers();

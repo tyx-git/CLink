@@ -12,7 +12,7 @@
 #include "src/share/core/config/configuration.hpp"
 #include "src/share/core/logging/logger.hpp"
 #include "src/client/core/registry.hpp"
-#include "src/client/core/ipc/ipc.hpp"
+#include "src/share/core/ipc/ipc.hpp"
 #include "src/share/include/clink/protocol/control_plane.hpp"
 
 #ifndef CLINK_SOURCE_DIR

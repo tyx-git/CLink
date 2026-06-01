@@ -145,27 +145,42 @@ bool relaunch_as_admin_if_needed(int argc, char** argv) {
         return false;
     }
 
-    std::cout << "Elevation requested. Waiting elevated instance bootstrap..." << std::endl;
+    std::cout << "Elevation requested. Waiting for elevated instance IPC pipe..." << std::endl;
     if (sei.hProcess) {
-        const DWORD wait_rc = WaitForInputIdle(sei.hProcess, 5000);
-        if (wait_rc == WAIT_TIMEOUT) {
-            std::cout << "Elevated process started (input idle timeout reached)." << std::endl;
-        } else if (wait_rc == WAIT_FAILED) {
-            std::cout << "Elevated process started (WaitForInputIdle failed; common for console apps)." << std::endl;
-        } else {
-            std::cout << "Elevated process started." << std::endl;
+        // Poll the IPC pipe to detect when the elevated process is ready.
+        // WaitForInputIdle is unreliable for console apps (no message pump).
+        const char* pipe_path = "\\\\.\\pipe\\clink-ipc";
+        constexpr int kMaxAttempts = 50; // 50 * 200ms = 10s timeout
+        bool pipe_ready = false;
+
+        for (int i = 0; i < kMaxAttempts; ++i) {
+            // Check if elevated process exited prematurely
+            DWORD exit_code = 0;
+            if (GetExitCodeProcess(sei.hProcess, &exit_code) && exit_code != STILL_ACTIVE) {
+                std::cerr << "Elevated process exited early, exit_code=" << exit_code << std::endl;
+                break;
+            }
+
+            HANDLE hTest = CreateFileA(pipe_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+            if (hTest != INVALID_HANDLE_VALUE) {
+                CloseHandle(hTest);
+                pipe_ready = true;
+                break;
+            }
+
+            DWORD err = GetLastError();
+            if (err != ERROR_PIPE_BUSY && err != ERROR_FILE_NOT_FOUND) {
+                // Non-transient error, stop polling
+                break;
+            }
+
+            Sleep(200);
         }
 
-        const DWORD short_wait = WaitForSingleObject(sei.hProcess, 3000);
-        if (short_wait == WAIT_OBJECT_0) {
-            DWORD code = 0;
-            if (GetExitCodeProcess(sei.hProcess, &code)) {
-                std::cerr << "Elevated process exited early, exit_code=" << code << std::endl;
-            } else {
-                std::cerr << "Elevated process exited early (exit code unavailable)." << std::endl;
-            }
+        if (pipe_ready) {
+            std::cout << "Elevated process IPC pipe is ready." << std::endl;
         } else {
-            std::cout << "Elevated process is running." << std::endl;
+            std::cout << "Elevated process started (IPC pipe not detected within timeout)." << std::endl;
         }
 
         CloseHandle(sei.hProcess);

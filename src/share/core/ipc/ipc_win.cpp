@@ -1,4 +1,4 @@
-#include "src/server/core/ipc/ipc.hpp"
+#include "src/share/core/ipc/ipc.hpp"
 #include "src/share/core/ipc/ipc_message_utils.hpp"
 #include "src/share/core/logging/logger.hpp"
 
@@ -255,33 +255,117 @@ public:
     void disconnect() override {}
 
     Message send_request(const Message& request) override {
-        auto err = [&](const std::string& msg) {
-            return detail::make_error_response(request, msg);
+        auto make_error_payload = [&](const std::string& msg, const std::string& reason = std::string{}) {
+            return detail::build_error_payload(request.command, msg, reason);
         };
 
-        HANDLE hPipe = CreateFileW(waddress_.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-        if (hPipe == INVALID_HANDLE_VALUE) return err("failed to open pipe");
+        auto should_retry_once = [&](const std::string& cmd) {
+            return cmd == "status" || cmd == "logs";
+        };
 
-        DWORD mode = PIPE_READMODE_MESSAGE;
-        if (!SetNamedPipeHandleState(hPipe, &mode, NULL, NULL)) {
+        auto send_once = [&](bool allow_retry_hint) -> Message {
+            HANDLE hPipe = INVALID_HANDLE_VALUE;
+            int retries = 5;
+
+            while (retries > 0) {
+                hPipe = CreateFileW(
+                    waddress_.c_str(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    NULL,
+                    OPEN_EXISTING,
+                    0,
+                    NULL);
+
+                if (hPipe != INVALID_HANDLE_VALUE) {
+                    break;
+                }
+
+                DWORD err = GetLastError();
+                if (err == ERROR_PIPE_BUSY) {
+                    if (!WaitNamedPipeW(waddress_.c_str(), 100)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                retries--;
+            }
+
+            if (hPipe == INVALID_HANDLE_VALUE) {
+                DWORD lastErr = GetLastError();
+                std::string errMsg = "command=" + request.command + " failed to open pipe " + address_ +
+                                     " (error " + std::to_string(lastErr) + ")";
+                std::string reason = control_plane::kReasonPipeOpenFailed;
+                if (lastErr == ERROR_FILE_NOT_FOUND || lastErr == ERROR_PATH_NOT_FOUND) {
+                    reason = control_plane::kReasonServiceNotRunning;
+                    errMsg += " - service might not be running";
+                }
+                return detail::make_error_response(request, errMsg, reason);
+            }
+
+            DWORD dwMode = PIPE_READMODE_MESSAGE;
+            if (!SetNamedPipeHandleState(hPipe, &dwMode, NULL, NULL)) {
+                CloseHandle(hPipe);
+                return detail::make_error_response(request,
+                                                   "command=" + request.command + " failed to set pipe mode",
+                                                   control_plane::kReasonPipeSetModeFailed);
+            }
+
+            std::string out = detail::build_wire_message(request.command, request.payload);
+            if (!write_frame(hPipe, out)) {
+                const DWORD err = GetLastError();
+                CloseHandle(hPipe);
+                return detail::make_error_response(request,
+                                                   "command=" + request.command + " failed to write to pipe (error " +
+                                                       std::to_string(err) + ")",
+                                                   control_plane::kReasonPipeWriteFailed);
+            }
+
+            std::string raw;
+            Message resp{MessageType::Response, request.command, ""};
+
+            if (!read_frame(hPipe, raw)) {
+                const DWORD err = GetLastError();
+                if (err == ERROR_BROKEN_PIPE) {
+                    std::string msg = "daemon closed pipe before response (command=" + request.command + ", error=109)";
+                    if (request.command == "connect") {
+                        msg += " - check daemon logs last 50 lines";
+                    } else if (allow_retry_hint) {
+                        msg += " - retrying once";
+                    }
+                    resp.payload = make_error_payload(msg, control_plane::kReasonPipeReadFailed);
+                } else {
+                    resp.payload = make_error_payload("command=" + request.command + " failed to read from pipe (error " +
+                                                     std::to_string(err) + ")",
+                                                     control_plane::kReasonPipeReadFailed);
+                }
+
+                CloseHandle(hPipe);
+                return resp;
+            }
+
+            resp.payload = detail::extract_wire_payload(raw);
+
             CloseHandle(hPipe);
-            return err("failed to set pipe mode");
+            return resp;
+        };
+
+        auto first = send_once(should_retry_once(request.command));
+        if (!should_retry_once(request.command)) {
+            return first;
         }
 
-        std::string out = detail::build_wire_message(request.command, request.payload);
-        if (!write_frame(hPipe, out)) {
-            CloseHandle(hPipe);
-            return err("failed to write request");
+        if (first.payload.find("error=109") == std::string::npos) {
+            return first;
         }
 
-        std::string raw;
-        if (!read_frame(hPipe, raw)) {
-            CloseHandle(hPipe);
-            return err("failed to read response");
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        auto second = send_once(false);
+        if (second.payload.find("\"ok\":false") != std::string::npos && second.payload.find("error=109") != std::string::npos) {
+            return first;
         }
-
-        CloseHandle(hPipe);
-        return {MessageType::Response, request.command, detail::extract_wire_payload(raw)};
+        return second;
     }
 
 private:
@@ -294,8 +378,17 @@ std::unique_ptr<IpcServer> create_server(std::shared_ptr<logging::Logger> logger
     return std::make_unique<WindowsIpcServer>(std::move(logger));
 }
 
+std::unique_ptr<IpcServer> create_server() {
+    return create_server(nullptr);
+}
+
 std::unique_ptr<IpcClient> create_client(std::shared_ptr<logging::Logger> logger) {
     return std::make_unique<WindowsIpcClient>(std::move(logger));
+}
+
+// Windows uses thread-based Named Pipe IPC; io_context parameter is unused.
+std::unique_ptr<IpcServer> create_server(asio::io_context& /*io*/, std::shared_ptr<logging::Logger> logger) {
+    return create_server(std::move(logger));
 }
 
 } // namespace clink::core::ipc
