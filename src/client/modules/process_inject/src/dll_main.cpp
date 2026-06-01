@@ -35,35 +35,62 @@ std::string build_log_file_path() {
     return path;
 }
 
+static HANDLE g_log_file = INVALID_HANDLE_VALUE;
+static std::mutex g_log_mutex;
+constexpr DWORD kMaxLogFileSize = 10 * 1024 * 1024; // 10 MB
+
 void local_debug_log(const std::string& msg) {
     // Output to debugger
     std::string debug_msg = "[CLink] " + msg + "\n";
     OutputDebugStringA(debug_msg.c_str());
 
-    // Fallback local file log (kept for early bootstrap / IPC unavailable cases)
-    static const std::string kLogFilePath = build_log_file_path();
-    HANDLE hFile = CreateFileA(kLogFilePath.c_str(),
-        FILE_APPEND_DATA,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        NULL,
-        OPEN_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL);
+    // Persistent file log with size rotation
+    std::lock_guard<std::mutex> lock(g_log_mutex);
 
-    if (hFile != INVALID_HANDLE_VALUE) {
-        char buffer[64];
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        int len = snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%03d - ",
-            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-
-        DWORD written = 0;
-        WriteFile(hFile, buffer, len, &written, NULL);
-        WriteFile(hFile, msg.c_str(), (DWORD)msg.length(), &written, NULL);
-        WriteFile(hFile, "\r\n", 2, &written, NULL);
-
-        CloseHandle(hFile);
+    if (g_log_file == INVALID_HANDLE_VALUE) {
+        static const std::string kLogFilePath = build_log_file_path();
+        g_log_file = CreateFileA(kLogFilePath.c_str(),
+            FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL);
     }
+
+    if (g_log_file == INVALID_HANDLE_VALUE) return;
+
+    // Check file size and rotate if needed
+    DWORD size = GetFileSize(g_log_file, NULL);
+    if (size != INVALID_FILE_SIZE && size > kMaxLogFileSize) {
+        CloseHandle(g_log_file);
+        g_log_file = INVALID_HANDLE_VALUE;
+        static const std::string kLogFilePath = build_log_file_path();
+        static const std::string kLogOldPath = kLogFilePath + ".old";
+        DeleteFileA(kLogOldPath.c_str());
+        MoveFileA(kLogFilePath.c_str(), kLogOldPath.c_str());
+        g_log_file = CreateFileA(kLogFilePath.c_str(),
+            FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL);
+    }
+
+    if (g_log_file == INVALID_HANDLE_VALUE) return;
+
+    char buffer[64];
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    int len = snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%03d - ",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+    DWORD written = 0;
+    WriteFile(g_log_file, buffer, len, &written, NULL);
+    WriteFile(g_log_file, msg.c_str(), (DWORD)msg.length(), &written, NULL);
+    WriteFile(g_log_file, "\r\n", 2, &written, NULL);
+    FlushFileBuffers(g_log_file);
 }
 
 namespace {
@@ -340,26 +367,7 @@ DWORD WINAPI ReadLoopThreadProc(LPVOID lpParam) {
     return 0;
 }
 
-void connect_ipc() {
-    bridge_log("connect_ipc: starting");
-    if (g_shutting_down) {
-        bridge_log("connect_ipc: shutting down, aborting");
-        return;
-    }
-
-    // Avoid duplicate connect attempts/thread races
-    std::unique_lock<std::mutex> connect_lock(g_connect_mutex, std::try_to_lock);
-    if (!connect_lock.owns_lock()) {
-        return;
-    }
-
-    {
-        std::lock_guard<std::mutex> pipe_lock(g_pipe_mutex);
-        if (g_connected && g_pipe != INVALID_HANDLE_VALUE) {
-            return;
-        }
-    }
-
+void connect_ipc_sync() {
     // Retry loop for connection - do not hold lock during wait
     HANDLE hPipe = INVALID_HANDLE_VALUE;
     for (int i = 0; i < 5; ++i) {
@@ -417,6 +425,42 @@ void connect_ipc() {
                 g_pipe = INVALID_HANDLE_VALUE;
             }
         }
+    }
+}
+
+DWORD WINAPI ConnectIpcThreadProc(LPVOID) {
+    connect_ipc_sync();
+    return 0;
+}
+
+void connect_ipc() {
+    bridge_log("connect_ipc: starting");
+    if (g_shutting_down) {
+        bridge_log("connect_ipc: shutting down, aborting");
+        return;
+    }
+
+    // Avoid duplicate connect attempts/thread races
+    std::unique_lock<std::mutex> connect_lock(g_connect_mutex, std::try_to_lock);
+    if (!connect_lock.owns_lock()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> pipe_lock(g_pipe_mutex);
+        if (g_connected && g_pipe != INVALID_HANDLE_VALUE) {
+            return;
+        }
+    }
+
+    // Spawn background thread for async retry - don't block DllMain init
+    HANDLE hThread = CreateThread(NULL, 0, ConnectIpcThreadProc, NULL, 0, NULL);
+    if (hThread) {
+        CloseHandle(hThread);
+        bridge_log("connect_ipc: background retry thread started");
+    } else {
+        bridge_log("connect_ipc: failed to create retry thread, trying sync", true);
+        connect_ipc_sync();
     }
 }
 
@@ -896,6 +940,15 @@ void UninitializeHooks() {
     fpWSARecv = nullptr;
     fpCloseSocket = nullptr;
     bridge_log("UninitializeHooks: hooks disabled");
+
+    // Close persistent log file
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        if (g_log_file != INVALID_HANDLE_VALUE) {
+            CloseHandle(g_log_file);
+            g_log_file = INVALID_HANDLE_VALUE;
+        }
+    }
 }
 
 extern "C" __declspec(dllexport) void DisableHooks() {

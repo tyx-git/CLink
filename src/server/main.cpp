@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <iostream>
 #include <string>
@@ -21,7 +22,7 @@ namespace {
 
 std::atomic<clink::core::Application*> g_app_ptr{nullptr};
 std::atomic<int> g_last_signal{0};
-constexpr std::string_view kServerVersion{"1.3.0"};
+constexpr std::string_view kServerVersion{"1.3.4"};
 
 bool has_flag(int argc, char** argv, std::string_view flag) {
     for (int i = 1; i < argc; ++i) {
@@ -63,6 +64,43 @@ void print_version() {
 }
 
 #ifdef _WIN32
+std::string get_flag_value(int argc, char** argv, std::string_view flag) {
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string_view(argv[i]) == flag) {
+            return argv[i + 1];
+        }
+    }
+    return {};
+}
+
+std::string read_ipc_address_from_config(int argc, char** argv) {
+    std::string config_path = get_flag_value(argc, argv, "-c");
+    if (config_path.empty()) {
+        config_path = get_flag_value(argc, argv, "--config");
+    }
+    if (config_path.empty()) {
+        config_path = "config/clink.init.toml";
+    }
+
+    std::ifstream f(config_path);
+    if (!f.is_open()) return {};
+
+    std::string line;
+    while (std::getline(f, line)) {
+        // Simple TOML parser: look for ipc.address = "..."
+        auto pos = line.find("ipc.address");
+        if (pos == std::string::npos) continue;
+        pos = line.find('=', pos + 11);
+        if (pos == std::string::npos) continue;
+        auto q1 = line.find('"', pos + 1);
+        if (q1 == std::string::npos) continue;
+        auto q2 = line.find('"', q1 + 1);
+        if (q2 == std::string::npos) continue;
+        return line.substr(q1 + 1, q2 - q1 - 1);
+    }
+    return {};
+}
+
 std::string quote_arg(std::string_view arg) {
     const bool need_quote = arg.find_first_of(" \t\"") != std::string_view::npos;
     if (!need_quote) {
@@ -149,7 +187,10 @@ bool relaunch_as_admin_if_needed(int argc, char** argv) {
     if (sei.hProcess) {
         // Poll the IPC pipe to detect when the elevated process is ready.
         // WaitForInputIdle is unreliable for console apps (no message pump).
-        const char* pipe_path = "\\\\.\\pipe\\clink-ipc";
+        std::string pipe_path = read_ipc_address_from_config(argc, argv);
+        if (pipe_path.empty()) {
+            pipe_path = "\\\\.\\pipe\\clink-ipc";
+        }
         constexpr int kMaxAttempts = 50; // 50 * 200ms = 10s timeout
         bool pipe_ready = false;
 
@@ -161,7 +202,7 @@ bool relaunch_as_admin_if_needed(int argc, char** argv) {
                 break;
             }
 
-            HANDLE hTest = CreateFileA(pipe_path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
+            HANDLE hTest = CreateFileA(pipe_path.c_str(), GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
             if (hTest != INVALID_HANDLE_VALUE) {
                 CloseHandle(hTest);
                 pipe_ready = true;

@@ -1,5 +1,6 @@
 #include "src/server/core/application/application.hpp"
 #include "src/share/core/config/config_signature.hpp"
+#include "src/share/core/config/log_path_utils.hpp"
 #include "src/share/core/logging/config.hpp"
 #include "src/server/core/network/session_manager_impl.hpp"
 #include "src/server/core/network/tcp_adapter.hpp"
@@ -36,6 +37,7 @@ namespace {
 namespace control_plane = clink::protocol::control_plane;
 using clink::core::config::build_prefixed_signature;
 using clink::core::config::build_logging_signature;
+using clink::core::config::resolve_log_file_path;
 
 #ifdef _WIN32
 std::string to_utf8_safe(std::string input) {
@@ -170,28 +172,6 @@ std::string build_process_manager_signature(const config::Configuration& configu
     return signature;
 }
 
-std::string resolve_log_file_path(const config::Configuration& configuration) {
-    for (int i = 0; i < 10; ++i) {
-        const std::string prefix = "logging.sinks[" + std::to_string(i) + "]";
-        const std::string type = configuration.get_string(prefix + ".type", "");
-        const bool enabled = configuration.get_bool(prefix + ".enabled", true);
-        if (!enabled) {
-            continue;
-        }
-        if (type == "file" || type == "rotating" || type == "rotating_file" || type == "daily" || type == "daily_file") {
-            const std::string path = configuration.get_string(prefix + ".path", "");
-            if (!path.empty()) {
-                return path;
-            }
-        }
-    }
-
-#ifdef _WIN32
-    return "logs/clink-win.log";
-#else
-    return "logs/clink-linux.log";
-#endif
-}
 } // namespace
 
 Application::Application(ApplicationOptions options)
@@ -891,7 +871,7 @@ void Application::run() {
     // Modules are stopped by shutdown() to avoid duplicate stop during signal-driven shutdown.
 }
 
-void Application::shutdown(std::chrono::milliseconds /*timeout*/) {
+void Application::shutdown(std::chrono::milliseconds timeout) {
     bool expected_shutdown = false;
     if (!shutdown_called_.compare_exchange_strong(expected_shutdown, true)) {
         return; // already shut down (or shutting down)
@@ -918,11 +898,24 @@ void Application::shutdown(std::chrono::milliseconds /*timeout*/) {
     // Stop modules first, then I/O thread/resources
     stop_modules();
 
-    // Stop Asio
+    // Stop Asio with timeout
     io_work_.reset();
     io_context_.stop();
     if (io_thread_.joinable()) {
-        io_thread_.join();
+        if (timeout.count() > 0) {
+            auto deadline = std::chrono::steady_clock::now() + timeout;
+            while (io_thread_.joinable() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                // Check if thread finished
+                // Note: std::thread has no try_join, so we poll with sleep
+            }
+            if (io_thread_.joinable()) {
+                log_lifecycle("shutdown timeout reached, I/O thread still running");
+            }
+        }
+        if (io_thread_.joinable()) {
+            io_thread_.join();
+        }
     }
 
     if (session_manager_) {

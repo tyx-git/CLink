@@ -1,0 +1,28 @@
+# ACL (Access Control List) 配置示例
+# 将此文件复制为 config/acl.toml 并按需修改
+# 如果 config/acl.toml 不存在，ACL 功能将被跳过
+
+# 默认策略：allow 或 deny
+default_policy = "allow"
+
+# 规则列表（按顺序匹配，首条命中生效）
+[[rules]]
+# 基于 IP 地址的规则
+type = "ip"
+action = "deny"
+target = "192.168.1.100"
+comment = "封禁特定 IP"
+
+[[rules]]
+# 基于子网的规则
+type = "subnet"
+action = "allow"
+target = "10.0.0.0/8"
+comment = "允许内网访问"
+
+[[rules]]
+# 基于用户名的规则（需配合 PSK 认证）
+type = "user"
+action = "allow"
+target = "admin"
+comment = "允许管理员"

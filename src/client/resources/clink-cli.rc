@@ -2,8 +2,8 @@ IDI_ICON1 ICON "cv.ico"
 IDR_CV_IMAGE RCDATA "cv.ico"
 
 1 VERSIONINFO
-FILEVERSION 1,3,0,0
-PRODUCTVERSION 1,3,0,0
+FILEVERSION 1,3,4,0
+PRODUCTVERSION 1,3,4,0
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -20,12 +20,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "CLink"
             VALUE "FileDescription", "CLink Command Line Interface"
-            VALUE "FileVersion", "1.3.0.0"
+            VALUE "FileVersion", "1.3.4.0"
             VALUE "InternalName", "clink-cli.exe"
             VALUE "LegalCopyright", "Copyright (C) 2026 TTxyz"
             VALUE "OriginalFilename", "clink-cli.exe"
             VALUE "ProductName", "CLink"
-            VALUE "ProductVersion", "1.3.0.0"
+            VALUE "ProductVersion", "1.3.4.0"
         END
     END
     BLOCK "VarFileInfo"

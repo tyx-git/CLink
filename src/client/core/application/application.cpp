@@ -6,6 +6,8 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
+#else
+#include <unistd.h>
 #endif
 
 #include <nlohmann/json.hpp>
@@ -370,10 +372,15 @@ void Application::connect_session() {
 #endif
 
             try {
-                std::string server_endpoint = "127.0.0.1:4433";
-                if (configuration_.contains("transport.server_endpoint")) {
-                    server_endpoint = configuration_.get_string("transport.server_endpoint");
+                if (!configuration_.contains("transport.server_endpoint")) {
+                    logger_->error("transport.server_endpoint not configured");
+                    update_connect_status(control_plane::kStatusFailed,
+                                          control_plane::kReasonMissingEndpoint,
+                                          "transport.server_endpoint not configured");
+                    session_state_ = SessionState::Disconnected;
+                    return;
                 }
+                std::string server_endpoint = configuration_.get_string("transport.server_endpoint");
 
                 logger_->info("Connecting to server via TLS: " + server_endpoint);
 
@@ -425,7 +432,14 @@ void Application::connect_session() {
                     return;
                 }
 
-                std::string connected_session_id = "sess_tls_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 10000);
+                static std::atomic<uint64_t> session_counter{0};
+#ifdef _WIN32
+                const uint64_t pid = static_cast<uint64_t>(GetCurrentProcessId());
+#else
+                const uint64_t pid = static_cast<uint64_t>(getpid());
+#endif
+                std::string connected_session_id = "sess_" + std::to_string(pid) +
+                                                    "_" + std::to_string(session_counter.fetch_add(1));
                 {
                     std::lock_guard<std::mutex> lock(control_state_mutex_);
                     session_id_ = connected_session_id;

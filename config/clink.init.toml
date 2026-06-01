@@ -1,61 +1,69 @@
 [service]
-role = "service"
-data_dir = "${CLINK_DATA_DIR}"  # override via environment
+role = "service"                    # "service" = relay server, "client" = client daemon
+data_dir = "${CLINK_DATA_DIR}"      # 数据目录，可通过环境变量 CLINK_DATA_DIR 覆盖
 
 [network]
-# note: runtime reads network.listen_endpoint
-listen_endpoint = "tcp://0.0.0.0:4433"
-allow_self_connect_for_debug = false
-allow_self_connect = false
-bandwidth_limit = 10240  # 10 KB/s for testing rate limiting
+listen_endpoint = "tcp://0.0.0.0:4433"  # 监听地址（TCP 或 TLS 前缀）
+allow_self_connect_for_debug = false    # 允许调试模式下自连接（仅开发用）
+allow_self_connect = false              # 允许自连接（同 IP 同端口连接自己）
+bandwidth_limit = 10240                 # 全局带宽限制（bytes/s），0 = 不限
 
 [security]
-credential_provider = "psk"
-acl_file = "config/acl.toml"
+credential_provider = "psk"         # 认证方式：psk = 预共享密钥
+acl_file = "config/acl.toml"       # ACL 文件路径（可选，不存在则跳过）
 
 [observability]
-log_level = "info"
-metrics_endpoint = "localhost:9100"
+log_level = "info"                  # 日志级别：trace/debug/info/warn/error/critical
+metrics_endpoint = "localhost:9100" # Prometheus metrics 端点
 
 [logging]
-level = "info"
-format = "simple"
-pattern = "%Y-%m-%d %H:%M:%S.%e [%n] [%l] %v"
-async = true
-queue_size = 8192
-flush_interval = 3
+level = "info"                      # spdlog 全局日志级别
+format = "simple"                   # 日志格式：simple/detailed
+pattern = "%Y-%m-%d %H:%M:%S.%e [%n] [%l] %v"  # spdlog 格式串
+async = true                        # 异步日志
+queue_size = 8192                   # 异步队列大小
+flush_interval = 3                  # 刷新间隔（秒）
 
 [auth]
-psk_list = ["admin:AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAA4CF8PNDkO0WHzf0q2J69zwAAAAAeAAAAQwBMAGkAbgBrACAAUwBlAGMAdQByAGkAdAB5AAAAEGYAAAABAAAgAAAA14dtsN2TEHHHwpvQoXd8itD/+Q1/ZDA/AdmwVzE8tMgAAAAADoAAAAACAAAgAAAAWPdDhc60sCtR21rH9ajl5hnjzp7N2pI+dTVw/8hfM/YgAAAAy1MdyPbHQtpyn7TlE4MNBCqzEWaLrqfuLGsU84SrCBFAAAAAkl94EFM/wFkZR1Yl9VXutwN6FoZHHsqEK7Hl7tMqI0QUaE5WvdtpMwBWzRFm0DWkuHHS2xFFmgp5Ns7a0yYQuw==", "user1:AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAA4CF8PNDkO0WHzf0q2J69zwAAAAAeAAAAQwBMAGkAbgBrACAAUwBlAGMAdQByAGkAdAB5AAAAEGYAAAABAAAgAAAASgqIjrAE0A4K0JpiJAe51d2ElnVsPDgRGtl5OuvOgy0AAAAADoAAAAACAAAgAAAASXfAApSeV5TC/XdBdCWvXO1K/2RaMOzOZaOgSDQ/ZxYgAAAAbr2me85xuqhGpUOotXit5tnp70XVvTcECox9kdcLI+lAAAAAOwbttEYGWpYoVpkQYxknL8pckjQF59oeUVi6HQ4/mZ5IKovaTyC8vnWVC8o+xlSek8h0illLn/8XhRzcqg0QMA=="]
+# PSK 列表格式：["username:encrypted_or_plaintext_password", ...]
+# 生成加密密码：clink-cli encrypt <password>
+# 示例（明文，仅用于测试）：
+# psk_list = ["admin:mypassword", "user1:userpassword"]
+# 生产环境请使用 clink-cli encrypt 生成加密后的密码
+psk_list = []
 
 [client]
-remote_endpoint = "tls://127.0.0.1:4433"
+remote_endpoint = "tls://127.0.0.1:4433"  # 客户端连接的远程服务器地址
 
+# 全局策略：未匹配任何组/设备时的默认策略
 [policy.global]
-max_bandwidth_up = 104857600  # 100 Mbps
-max_bandwidth_down = 104857600
-session_timeout = 3600
-allow_split_tunneling = true
-allowed_subnets = ["0.0.0.0/0"]
+max_bandwidth_up = 104857600        # 上行带宽上限（bytes/s），100 Mbps
+max_bandwidth_down = 104857600      # 下行带宽上限（bytes/s），100 Mbps
+session_timeout = 3600              # 会话超时（秒）
+allow_split_tunneling = true        # 允许分流隧道
+allowed_subnets = ["0.0.0.0/0"]     # 允许的子网列表
 
+# 组策略示例：按用户组覆盖全局策略
 [policy.groups.vip]
-max_bandwidth_up = 1073741824  # 1 Gbps
+max_bandwidth_up = 1073741824       # 1 Gbps
 max_bandwidth_down = 1073741824
 
+# 设备策略示例：按设备 ID 覆盖全局策略
 [policy.devices.device-001]
-max_bandwidth_up = 209715200   # 200 Mbps
+max_bandwidth_up = 209715200        # 200 Mbps
 allow_split_tunneling = false
 
+# 日志输出目标（可多个）
 [[logging.sinks]]
-type = "console"
+type = "console"                    # 控制台输出
 enabled = true
-level = "trace"
+level = "trace"                     # 该 sink 的独立日志级别
 
 [[logging.sinks]]
-type = "rotating"
+type = "rotating"                   # 轮转文件输出
 enabled = true
 level = "trace"
-path = "logs/clink-daemon.log"
-max_size = "10MB"
-max_files = 5
-rotation_time = "daily"
+path = "logs/clink-daemon.log"      # 日志文件路径
+max_size = "10MB"                   # 单文件最大大小
+max_files = 5                       # 最大轮转文件数
+rotation_time = "daily"             # 轮转周期

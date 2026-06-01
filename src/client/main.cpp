@@ -1,5 +1,6 @@
 #include "src/client/core/application/application.hpp"
 #include "src/client/core/utils/terminal.hpp"
+#include "src/share/core/config/log_path_utils.hpp"
 #include "src/share/include/clink/protocol/control_plane.hpp"
 #include "src/server/core/security/dpapi_helper.hpp"
 #include <nlohmann/json.hpp>
@@ -268,26 +269,7 @@ bool payload_requires_restart(const json& payload) {
 }
 
 std::string resolve_expected_log_path(const clink::core::config::Configuration& configuration) {
-    for (int i = 0; i < 10; ++i) {
-        const std::string prefix = "logging.sinks[" + std::to_string(i) + "]";
-        const std::string type = configuration.get_string(prefix + ".type", "");
-        const bool enabled = configuration.get_bool(prefix + ".enabled", true);
-        if (!enabled) {
-            continue;
-        }
-        if (type == "file" || type == "rotating" || type == "rotating_file" || type == "daily" || type == "daily_file") {
-            const std::string path = configuration.get_string(prefix + ".path", "");
-            if (!path.empty()) {
-                return path;
-            }
-        }
-    }
-
-#ifdef _WIN32
-    return "logs/clink-cli.log";
-#else
-    return "logs/clink-cli.log";
-#endif
+    return clink::core::config::resolve_log_file_path(configuration, "logs/clink-cli.log");
 }
 
 void add_unique_line(std::vector<std::string>& lines, std::string line) {
