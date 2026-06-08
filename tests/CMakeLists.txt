@@ -3,6 +3,10 @@ add_executable(clink-tests main.cpp)
 target_link_libraries(clink-tests PRIVATE clink::core)
 set_project_options(clink-tests)
 add_test(NAME clink-core-smoke COMMAND clink-tests)
+if(WIN32)
+    set_tests_properties(clink-core-smoke PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CMAKE_SOURCE_DIR}/Out")
+endif()
 
 # Catch2 tests for logging system
 if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
@@ -54,7 +58,11 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
 
     set_project_options(clink-network-tests-v2)
 
-    add_test(NAME clink-network-tests-v2 COMMAND clink-network-tests-v2)
+    add_test(NAME clink-network-tests-v2 COMMAND clink-network-tests-v2 --order decl)
+    if(WIN32)
+        set_tests_properties(clink-network-tests-v2 PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CMAKE_SOURCE_DIR}/Out")
+    endif()
 endif()
 
 # Performance tests for logging system

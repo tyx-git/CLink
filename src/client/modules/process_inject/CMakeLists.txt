@@ -12,6 +12,7 @@ set_target_properties(clink-process-client PROPERTIES
 
 target_include_directories(clink-process-client PUBLIC
     include
+    ${CMAKE_SOURCE_DIR}
 )
 
 target_link_libraries(clink-process-client PUBLIC
