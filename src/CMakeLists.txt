@@ -83,7 +83,7 @@ target_link_libraries(clink-core PUBLIC
 
 if (WIN32)
     target_link_libraries(clink-core PUBLIC
-        clink-process-server
+        clink-inject
     )
     target_compile_definitions(clink-core PRIVATE _WIN32)
 elseif (UNIX AND NOT APPLE)
@@ -96,24 +96,25 @@ add_library(clink::core ALIAS clink-core)
 set_project_options(clink-core)
 
 if (WIN32)
-    add_executable(clink-server
+    add_executable(clinkd
         server/main.cpp
-        server/resources/clink-server.rc
+        server/resources/clinkd.rc
     )
 else()
-    add_executable(clink-server
+    add_executable(clinkd
         server/main.cpp
     )
 endif()
 
-target_link_libraries(clink-server PRIVATE 
+target_link_libraries(clinkd PRIVATE 
     clink::core
 )
 
-set_project_options(clink-server)
+set_project_options(clinkd)
 
 # Output binaries to Out directory
-set_target_properties(clink-server PROPERTIES 
+set_target_properties(clinkd PROPERTIES
+    OUTPUT_NAME "clinkd"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/Out"
 )
 
@@ -143,7 +144,7 @@ target_link_libraries(clink-client-core PUBLIC
 
 if (WIN32)
     target_link_libraries(clink-client-core PUBLIC
-        clink-process-server
+        clink-inject
     )
     target_compile_definitions(clink-client-core PRIVATE _WIN32)
 elseif (UNIX AND NOT APPLE)
@@ -151,22 +152,23 @@ elseif (UNIX AND NOT APPLE)
 endif()
 
 if (WIN32)
-    add_executable(clink-cli
+    add_executable(clink
         client/main.cpp
-        client/resources/clink-cli.rc
+        client/resources/clink.rc
     )
 else()
-    add_executable(clink-cli
+    add_executable(clink
         client/main.cpp
     )
 endif()
 
-target_link_libraries(clink-cli PRIVATE 
+target_link_libraries(clink PRIVATE 
     clink-client-core
 )
 
-set_project_options(clink-cli)
+set_project_options(clink)
 
-set_target_properties(clink-cli PROPERTIES 
+set_target_properties(clink PROPERTIES
+    OUTPUT_NAME "clink"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/Out"
 )

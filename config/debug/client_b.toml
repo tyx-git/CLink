@@ -63,4 +63,4 @@ address = '\\.\pipe\clink-ipc-debug-b'
 
 [process.inject]
 target_pid = 0
-dll = "D:\\Project\\CLink\\Out\\clink-client-hook.dll"
+dll = "D:\\Project\\CLink\\Out\\clink-hook.dll"

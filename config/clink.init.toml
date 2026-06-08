@@ -26,10 +26,10 @@ flush_interval = 3                  # 刷新间隔（秒）
 
 [auth]
 # PSK 列表格式：["username:encrypted_or_plaintext_password", ...]
-# 生成加密密码：clink-cli encrypt <password>
+# 生成加密密码：clink encrypt <password>
 # 示例（明文，仅用于测试）：
 # psk_list = ["admin:mypassword", "user1:userpassword"]
-# 生产环境请使用 clink-cli encrypt 生成加密后的密码
+# 生产环境请使用 clink encrypt 生成加密后的密码
 psk_list = []
 
 [ipc]

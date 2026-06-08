@@ -2,8 +2,8 @@
 
 CLink 是一个 **跨平台 daemon + CLI** 的会话隧道项目（Windows / Linux）。
 
-- `clink-server`：核心守护进程（数据面 + 控制面）
-- `clink-cli`：本地控制工具（通过 IPC 控制本机 daemon）
+- `clinkd`：核心守护进程（数据面 + 控制面）
+- `clink`：本地控制工具（通过 IPC 控制本机 daemon）
 
 > 版本：`1.3.5`  
 > 作者：`TTxyz`
@@ -14,8 +14,8 @@ CLink 是一个 **跨平台 daemon + CLI** 的会话隧道项目（Windows / Lin
 
 CLink 的设计不是“CLI 直连远端”，而是：
 
-1. `clink-cli` 向本机 `clink-server` 发 IPC 命令（connect/status/disconnect 等）
-2. 本机 `clink-server` 再与远端 `clink-server` 建立 TCP/TLS 会话
+1. `clink` 向本机 `clinkd` 发 IPC 命令（connect/status/disconnect 等）
+2. 本机 `clinkd` 再与远端 `clinkd` 建立 TCP/TLS 会话
 3. 两端 daemon 负责会话生命周期、转发、重试、日志与观测
 
 适合场景：跨端联机、隧道接入、代理转发、进程注入链路（Windows）。
@@ -26,12 +26,12 @@ CLink 的设计不是“CLI 直连远端”，而是：
 
 构建后输出在：`Out/`
 
-- `Out/clink-server` / `Out/clink-server.exe`
-- `Out/clink-cli` / `Out/clink-cli.exe`
+- `Out/clinkd` / `Out/clinkd.exe`
+- `Out/clink` / `Out/clink.exe`
 
 日志默认落地到：
 
-- CLI：默认 `logs/clink-cli.log`
+- CLI：默认 `logs/clink.log`
 - 服务端：优先使用配置文件 `[[logging.sinks]]` 中启用的文件类 sink 路径
 - 若服务端未配置文件类 sink，则回退到平台默认：Windows `logs/clink-win.log`，Linux `logs/clink-linux.log`
 
@@ -44,31 +44,31 @@ CLink 的设计不是“CLI 直连远端”，而是：
 
 ```bash
 cd /mnt/d/Project/CLink
-./Out/clink-server --config ./config/clink.init.toml
+./Out/clinkd --config ./config/clink.init.toml
 ```
 
 ### 3.2 启动本地服务端（Windows）
 
 ```powershell
 cd D:\Project\CLink
-.\Out\clink-server.exe --config .\config\clink.init.toml
+.\Out\clinkd.exe --config .\config\clink.init.toml
 ```
 
 ### 3.3 用 CLI 控制本地 daemon（Windows）
 
 ```powershell
 cd D:\Project\CLink
-.\Out\clink-cli.exe connect --transport tcp --ip <server-ip> --port <port>
-.\Out\clink-cli.exe status
-.\Out\clink-cli.exe disconnect
+.\Out\clink.exe connect --transport tcp --ip <server-ip> --port <port>
+.\Out\clink.exe status
+.\Out\clink.exe disconnect
 ```
 
 ### 3.4 查看服务端帮助与版本
 
 ```powershell
 cd D:\Project\CLink
-.\Out\clink-server.exe --help
-.\Out\clink-server.exe --version
+.\Out\clinkd.exe --help
+.\Out\clinkd.exe --version
 ```
 
 > `--help` / `--version` 不会触发 Windows 自动提权。
@@ -78,7 +78,7 @@ cd D:\Project\CLink
 ```powershell
 cd D:\Project\CLink
 $env:CLINK_DISABLE_VIF='1'
-.\Out\clink-server.exe --no-elevate --config .\config\clink.init.toml
+.\Out\clinkd.exe --no-elevate --config .\config\clink.init.toml
 ```
 
 > `--no-elevate` 只跳过自动提权；如需非管理员排查，请同时关闭 VIF。
@@ -134,7 +134,7 @@ $env:CLINK_DISABLE_VIF='1'
 ```powershell
 cd D:\Project\CLink
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --target clink-cli clink-server -j 8
+cmake --build build --config Release --target clink clinkd -j 8
 ```
 
 ## 5.3 Linux / WSL
@@ -142,7 +142,7 @@ cmake --build build --config Release --target clink-cli clink-server -j 8
 ```bash
 cd /mnt/d/Project/CLink
 cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-linux --target clink-cli clink-server -j 8
+cmake --build build-linux --target clink clinkd -j 8
 ```
 
 ## 5.4 使用 CMake Presets（推荐日常开发）
@@ -209,14 +209,14 @@ ctest --preset debug
 
 ### Q3: 为什么 CLI 能跑但没会话
 - CLI 仅控制器，不直接承担远程网络会话
-- 必须确保本机 `clink-server` 和远端 `clink-server` 都在运行
+- 必须确保本机 `clinkd` 和远端 `clinkd` 都在运行
 
 ---
 ---
 
 ## 7. CLI Exit Codes
 
-`clink-cli` uses a 3-level exit-code contract:
+`clink` uses a 3-level exit-code contract:
 
 - `0` = success
 - `1` = failed or rejected

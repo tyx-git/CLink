@@ -39,10 +39,9 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
     )
 
     if(WIN32)
-        target_sources(clink-network-tests-v2 PRIVATE 
+        target_sources(clink-network-tests-v2 PRIVATE
             server/ipc_proxy_test.cpp
             server/socks_server_test.cpp
-            server/dll_integration_test.cpp
         )
     endif()
 
@@ -53,7 +52,7 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
     )
 
     if(WIN32)
-        target_link_libraries(clink-network-tests-v2 PRIVATE clink-process-server)
+        target_link_libraries(clink-network-tests-v2 PRIVATE clink-inject)
     endif()
 
     set_project_options(clink-network-tests-v2)
@@ -62,6 +61,30 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
     if(WIN32)
         set_tests_properties(clink-network-tests-v2 PROPERTIES
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CMAKE_SOURCE_DIR}/Out")
+
+        if(TARGET clink-hook)
+            add_executable(clink-hook-tests
+                server/dll_integration_test.cpp
+            )
+            target_include_directories(clink-hook-tests
+                PRIVATE
+                    ${CMAKE_SOURCE_DIR}
+                    ${CMAKE_SOURCE_DIR}/src/client/modules/process_inject/include
+            )
+            target_link_libraries(clink-hook-tests
+                PRIVATE
+                    Catch2::Catch2WithMain
+                    asio
+                    ws2_32
+            )
+            add_dependencies(clink-hook-tests clink-hook)
+            set_project_options(clink-hook-tests)
+            add_test(NAME clink-hook-tests COMMAND clink-hook-tests)
+            set_tests_properties(clink-hook-tests PROPERTIES
+                ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${CMAKE_SOURCE_DIR}/Out")
+        else()
+            message(STATUS "Skipping clink-hook-tests because clink-hook target is not available")
+        endif()
     endif()
 endif()
 

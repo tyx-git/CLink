@@ -35,16 +35,10 @@ TEST_CASE("DLL Hook DataRecv Injection", "[dll][integration]") {
     
     std::jthread load_thread([&]() {
         std::cout << "Loading DLL..." << std::endl;
-        // Use absolute path to ensure we load the latest build
-        // Try clink-hook-v2.dll first (Server module)
-        hDll = LoadLibraryA("D:\\Project\\CLink\\Out\\clink-hook-v2.dll");
+        // Load the current client hook. CTest adds Out/ to PATH.
+        hDll = LoadLibraryA("clink-hook.dll");
         if (!hDll) {
-            // Fallback to relative path
-            hDll = LoadLibraryA("clink-hook-v2.dll");
-        }
-        if (!hDll) {
-            // Fallback to client hook if v2 not found
-            hDll = LoadLibraryA("D:\\Project\\CLink\\Out\\clink-client-hook.dll");
+            hDll = LoadLibraryA("clink-hook-legacy.dll");
         }
         
         if (hDll) {

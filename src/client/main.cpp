@@ -82,7 +82,7 @@ std::string format_bytes(uint64_t bytes) {
 }
 void print_usage() {
     Terminal::println("CLINK CLI", Color::BrightCyan);
-    Terminal::println("Usage: clink-cli [options] <command>");
+    Terminal::println("Usage: clink [options] <command>");
     Terminal::println("\nOptions:");
     Terminal::println("  -c, --config <path>      Path to configuration file");
     Terminal::println("      --ip <address>       Override remote server address for connect");
@@ -270,7 +270,7 @@ bool payload_requires_restart(const json& payload) {
 }
 
 std::string resolve_expected_log_path(const clink::core::config::Configuration& configuration) {
-    return clink::core::config::resolve_log_file_path(configuration, "logs/clink-cli.log");
+    return clink::core::config::resolve_log_file_path(configuration, "logs/clink.log");
 }
 
 void add_unique_line(std::vector<std::string>& lines, std::string line) {
@@ -590,7 +590,7 @@ int handle_monitor(clink::core::Application& app) {
 int handle_diag(clink::core::Application& app, const clink::core::ApplicationOptions& options) {
     int exit_code = 0;
     std::vector<std::string> suggestions;
-    std::string expected_log_path = "logs/clink-cli.log";
+    std::string expected_log_path = "logs/clink.log";
     auto mark_warning = [&]() {
         if (exit_code == 0) {
             exit_code = 2;
@@ -792,7 +792,7 @@ int handle_encrypt(int argc, char** argv) {
         }
     }
     if (secret.empty()) {
-        std::cout << "Usage: clink-cli encrypt <secret>" << std::endl;
+        std::cout << "Usage: clink encrypt <secret>" << std::endl;
         return 1;
     }
     try {
@@ -906,7 +906,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     clink::core::ApplicationOptions options;
-    options.identity = "clink-cli";
+    options.identity = "clink";
     options.role = "cli";
     options.heartbeat_interval = std::chrono::milliseconds(250);
     options.config_path = parse_config_path(argc, argv, options.config_path);

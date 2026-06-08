@@ -46,8 +46,8 @@ bool has_any_flag(int argc, char** argv, std::initializer_list<std::string_view>
 }
 
 void print_usage() {
-    std::cout << "CLINK Server\n";
-    std::cout << "Usage: clink-server [options]\n\n";
+    std::cout << "CLINK Daemon\n";
+    std::cout << "Usage: clinkd [options]\n\n";
     std::cout << "Options:\n";
     std::cout << "  -c, --config <path>      Path to configuration file\n";
     std::cout << "  -l, --log-level <level>  trace|debug|info|warn|error|critical\n";
@@ -60,7 +60,7 @@ void print_usage() {
 }
 
 void print_version() {
-    std::cout << "clink-server " << kServerVersion << std::endl;
+    std::cout << "clinkd " << kServerVersion << std::endl;
 }
 
 #ifdef _WIN32
@@ -300,9 +300,9 @@ int main(int argc, char** argv) {
 
     clink::core::ApplicationOptions options;
 #ifdef _WIN32
-    options.identity = "clink-server: windows";
+    options.identity = "clinkd: windows";
 #else
-    options.identity = "clink-server: linux";
+    options.identity = "clinkd: linux";
 #endif
     options.role = "service";
     options.heartbeat_interval = std::chrono::seconds(1);

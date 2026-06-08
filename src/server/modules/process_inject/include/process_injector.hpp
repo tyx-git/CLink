@@ -5,7 +5,7 @@
 #include <string>
 
 #if defined(_WIN32)
-  #if defined(clink_process_server_EXPORTS)
+  #if defined(clink_inject_EXPORTS) || defined(clink_process_server_EXPORTS)
     #define CLINK_PROCESS_INJECT_EXPORT __declspec(dllexport)
   #else
     #define CLINK_PROCESS_INJECT_EXPORT __declspec(dllimport)
