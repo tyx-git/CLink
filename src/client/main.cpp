@@ -815,6 +815,7 @@ struct ConnectCliOptions {
     bool no_self_check{false};
     bool allow_all{false};
     bool transport_explicit{false};
+    bool endpoint_override{false};
     bool has_override{false};
 };
 
@@ -825,9 +826,11 @@ ConnectCliOptions parse_connect_cli_options(int argc, char** argv) {
         std::string_view arg{argv[i]};
         if (arg == "--ip" && i + 1 < argc) {
             opts.ip = argv[++i];
+            opts.endpoint_override = true;
             opts.has_override = true;
         } else if (arg == "--port" && i + 1 < argc) {
             opts.port = argv[++i];
+            opts.endpoint_override = true;
             opts.has_override = true;
         } else if (arg == "--transport" && i + 1 < argc) {
             opts.transport = argv[++i];
@@ -861,8 +864,12 @@ ConnectCliOptions parse_connect_cli_options(int argc, char** argv) {
 std::string build_connect_payload(const ConnectCliOptions& opts, const std::string& transport_override = "") {
     std::string transport = transport_override.empty() ? opts.transport : transport_override;
     nlohmann::json payload;
-    payload["endpoint"] = transport + "://" + opts.ip + ":" + opts.port;
-    payload["transport"] = transport;
+    if (opts.endpoint_override) {
+        payload["endpoint"] = transport + "://" + opts.ip + ":" + opts.port;
+    }
+    if (opts.transport_explicit || opts.endpoint_override) {
+        payload["transport"] = transport;
+    }
     if (opts.timeout_ms > 0) {
         payload["timeout_ms"] = opts.timeout_ms;
     }
@@ -966,7 +973,12 @@ int main(int argc, char** argv) {
                     return outcome;
                 };
 
-                if (connect_opts.transport_explicit) {
+                if (!connect_opts.endpoint_override) {
+                    Terminal::println("Connect target: daemon configuration (transport.server_endpoint/client.remote_endpoint)", Color::Yellow);
+                    const auto payload = connect_opts.has_override ? build_connect_payload(connect_opts) : std::string{};
+                    const auto outcome = send_command_and_print(client, "connect", payload);
+                    rc = (outcome.ok && outcome.accepted) ? 0 : 1;
+                } else if (connect_opts.transport_explicit) {
                     const auto outcome = try_connect_with_transport(connect_opts.transport, connect_opts.transport == "tls" ? "TLS" : "TCP");
                     rc = outcome.accepted ? 0 : 1;
                 } else {

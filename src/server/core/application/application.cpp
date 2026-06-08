@@ -1291,6 +1291,9 @@ std::string Application::connect_session(const std::string& endpoint_override) {
 
     std::string endpoint = ov.endpoint;
     if (endpoint.empty()) {
+        endpoint = configuration_.get_string("transport.server_endpoint");
+    }
+    if (endpoint.empty()) {
         endpoint = configuration_.get_string("client.remote_endpoint");
     }
     if (endpoint.empty()) {

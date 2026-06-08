@@ -30,6 +30,8 @@ if(CLINK_ENABLE_TESTS AND TARGET Catch2::Catch2WithMain)
         network/session_manager_test.cpp
         network/zero_copy_test.cpp
         network/tcp_framing_test.cpp
+        application_connect_test.cpp
+        ipc_linux_test.cpp
     )
 
     if(WIN32)

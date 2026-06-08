@@ -3,6 +3,7 @@
 #include "src/server/core/network/tls_adapter.hpp"
 #include "src/share/core/network/packet.hpp"
 #include "src/server/core/observability/telemetry.hpp"
+#include <atomic>
 #include <chrono>
 #include <new>
 #include <optional>
@@ -15,6 +16,13 @@ std::string tid_str() {
     std::ostringstream oss;
     oss << std::this_thread::get_id();
     return oss.str();
+}
+
+std::string make_session_id() {
+    static std::atomic<uint64_t> counter{0};
+    const auto ticks = std::chrono::system_clock::now().time_since_epoch().count();
+    const auto seq = counter.fetch_add(1, std::memory_order_relaxed);
+    return "sess_" + std::to_string(ticks) + "_" + std::to_string(seq);
 }
 
 uint16_t read_u16_le(const uint8_t* data) {
@@ -448,7 +456,7 @@ void DefaultSessionManager::handle_new_connection(TransportAdapterPtr adapter) {
         span->set_attribute("acl_status", "allowed");
     }
 
-    std::string session_id = "sess_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    std::string session_id = make_session_id();
 
     if (policy_engine_) {
         if (logger_) logger_->info("[session.stage] policy.evaluate.begin session_id=" + session_id);

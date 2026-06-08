@@ -73,7 +73,15 @@ public:
         , acceptor_(io)
         , logger_(std::move(logger)) {}
 
-    ~AsyncUnixIpcServer() override { stop(); }
+    ~AsyncUnixIpcServer() override {
+        running_.store(false);
+        std::error_code ec;
+        acceptor_.cancel(ec);
+        acceptor_.close(ec);
+        if (!socket_path_.empty() && std::filesystem::exists(socket_path_)) {
+            std::filesystem::remove(socket_path_, ec);
+        }
+    }
 
     void start(const std::string& address) override {
         bool expected = false;
@@ -116,9 +124,11 @@ public:
     void stop() override {
         if (!running_.exchange(false)) return;
 
-        asio::post(strand_, [this] {
+        auto self = shared_from_this();
+        asio::post(strand_, [self] {
             std::error_code ec;
-            acceptor_.close(ec);
+            self->acceptor_.cancel(ec);
+            self->acceptor_.close(ec);
         });
 
         // Wait for io_context to drain pending handlers
@@ -248,6 +258,23 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> next_request_id_{0};
     std::string socket_path_;
+};
+
+class AsyncUnixIpcServerHandle : public IpcServer {
+public:
+    AsyncUnixIpcServerHandle(asio::io_context& io, std::shared_ptr<logging::Logger> logger)
+        : impl_(std::make_shared<AsyncUnixIpcServer>(io, std::move(logger))) {}
+
+    ~AsyncUnixIpcServerHandle() override { impl_->stop(); }
+
+    void start(const std::string& address) override { impl_->start(address); }
+    void stop() override { impl_->stop(); }
+    void set_handler(std::function<Message(const Message&)> handler) override {
+        impl_->set_handler(std::move(handler));
+    }
+
+private:
+    std::shared_ptr<AsyncUnixIpcServer> impl_;
 };
 
 // ---------------------------------------------------------------------------
@@ -531,7 +558,7 @@ std::unique_ptr<IpcServer> create_server() {
 }
 
 std::unique_ptr<IpcServer> create_server(asio::io_context& io, std::shared_ptr<logging::Logger> logger) {
-    return std::make_unique<AsyncUnixIpcServer>(io, std::move(logger));
+    return std::make_unique<AsyncUnixIpcServerHandle>(io, std::move(logger));
 }
 
 std::unique_ptr<IpcClient> create_client(std::shared_ptr<logging::Logger> logger) {

@@ -60,6 +60,39 @@ std::vector<std::string> parse_list(std::string_view list_raw) {
     return items;
 }
 
+std::string strip_inline_comment(std::string_view text) {
+    bool inside_string = false;
+    char quote_char = '\0';
+    bool escaped = false;
+
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char ch = static_cast<char>(text[i]);
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (inside_string && ch == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (ch == '"' || ch == '\'') {
+            if (!inside_string) {
+                inside_string = true;
+                quote_char = ch;
+            } else if (quote_char == ch) {
+                inside_string = false;
+                quote_char = '\0';
+            }
+            continue;
+        }
+        if (!inside_string && ch == '#') {
+            return Configuration::trim(text.substr(0, i));
+        }
+    }
+
+    return Configuration::trim(text);
+}
+
 }  // namespace
 
 Configuration Configuration::load_from_file(const std::filesystem::path& path) {
@@ -98,7 +131,7 @@ Configuration Configuration::load_from_file(const std::filesystem::path& path) {
         }
 
         auto key = trim(std::string_view{trimmed}.substr(0, delimiter));
-        auto value = trim(std::string_view{trimmed}.substr(delimiter + 1));
+        auto value = strip_inline_comment(std::string_view{trimmed}.substr(delimiter + 1));
         if (key.empty()) {
             continue;
         }

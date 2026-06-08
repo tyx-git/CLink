@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-#include <sstream>
+#include <filesystem>
+#include <fstream>
 
 #include "src/share/core/logging/config.hpp"
 #include "src/share/core/config/configuration.hpp"
@@ -163,10 +164,25 @@ TEST_CASE("Configuration integration", "[logging][config]") {
             REQUIRE(config.contains("logging.level") == true);
             REQUIRE(config.contains("logging.format") == true);
             REQUIRE(config.contains("logging.sinks[0].type") == true);
+            REQUIRE(config.contains("client.transport.server_endpoint") == false);
 
             // Parse logging config
             auto log_config = logging::LogConfig::from_toml(config);
             REQUIRE(log_config.validate() == true);
         }
     }
+}
+
+TEST_CASE("Configuration ignores inline comments outside quoted values", "[config]") {
+    const auto path = std::filesystem::temp_directory_path() / "clink-config-inline-comment-test.toml";
+    std::ofstream out(path, std::ios::trunc);
+    REQUIRE(out.is_open());
+    out << "[ipc]\n";
+    out << "address = \"\\\\.\\pipe\\custom-clink-ipc\" # custom daemon IPC pipe\n";
+    out.close();
+
+    const auto config = clink::core::config::Configuration::load_from_file(path);
+
+    REQUIRE(config.get_string("ipc.address") == "\\\\.\\pipe\\custom-clink-ipc");
+    std::filesystem::remove(path);
 }

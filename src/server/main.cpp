@@ -74,7 +74,7 @@ std::string get_flag_value(int argc, char** argv, std::string_view flag) {
 }
 
 std::string read_ipc_address_from_config(int argc, char** argv) {
-    std::string config_path = get_flag_value(argc, argv, "-c");
+    std::filesystem::path config_path = get_flag_value(argc, argv, "-c");
     if (config_path.empty()) {
         config_path = get_flag_value(argc, argv, "--config");
     }
@@ -82,23 +82,12 @@ std::string read_ipc_address_from_config(int argc, char** argv) {
         config_path = "config/clink.init.toml";
     }
 
-    std::ifstream f(config_path);
-    if (!f.is_open()) return {};
-
-    std::string line;
-    while (std::getline(f, line)) {
-        // Simple TOML parser: look for ipc.address = "..."
-        auto pos = line.find("ipc.address");
-        if (pos == std::string::npos) continue;
-        pos = line.find('=', pos + 11);
-        if (pos == std::string::npos) continue;
-        auto q1 = line.find('"', pos + 1);
-        if (q1 == std::string::npos) continue;
-        auto q2 = line.find('"', q1 + 1);
-        if (q2 == std::string::npos) continue;
-        return line.substr(q1 + 1, q2 - q1 - 1);
+    try {
+        const auto configuration = clink::core::config::Configuration::load_from_file(config_path);
+        return configuration.get_string("ipc.address", "");
+    } catch (...) {
+        return {};
     }
-    return {};
 }
 
 std::string quote_arg(std::string_view arg) {

@@ -37,11 +37,13 @@ psk_list = []
 # Windows 默认: \\.\pipe\clink-ipc, Linux 默认: /tmp/clink-ipc.sock
 # address = "\\.\pipe\\clink-ipc"
 
+[transport]
+# Daemon 自动连接的服务器端点（优先级高于 client.remote_endpoint）
+# server_endpoint = "tls://your-server-ip:4433"
+
 [client]
 # 客户端连接的远程服务器地址（CLI connect 命令使用）
 remote_endpoint = "tls://127.0.0.1:4433"
-# Daemon 自动连接的服务器端点（优先级高于 client.remote_endpoint）
-# transport.server_endpoint = "tls://your-server-ip:4433"
 
 # 全局策略：未匹配任何组/设备时的默认策略
 [policy.global]
