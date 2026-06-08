@@ -816,7 +816,10 @@ struct ConnectCliOptions {
     bool allow_all{false};
     bool transport_explicit{false};
     bool endpoint_override{false};
-    bool has_override{false};
+
+    bool has_daemon_payload() const noexcept {
+        return endpoint_override || transport_explicit || timeout_ms > 0 || no_self_check;
+    }
 };
 
 ConnectCliOptions parse_connect_cli_options(int argc, char** argv) {
@@ -827,15 +830,12 @@ ConnectCliOptions parse_connect_cli_options(int argc, char** argv) {
         if (arg == "--ip" && i + 1 < argc) {
             opts.ip = argv[++i];
             opts.endpoint_override = true;
-            opts.has_override = true;
         } else if (arg == "--port" && i + 1 < argc) {
             opts.port = argv[++i];
             opts.endpoint_override = true;
-            opts.has_override = true;
         } else if (arg == "--transport" && i + 1 < argc) {
             opts.transport = argv[++i];
             opts.transport_explicit = true;
-            opts.has_override = true;
         } else if (arg == "--timeout" && i + 1 < argc) {
             try {
                 opts.timeout_ms = std::stoi(argv[++i]);
@@ -843,10 +843,8 @@ ConnectCliOptions parse_connect_cli_options(int argc, char** argv) {
             } catch (...) {
                 opts.timeout_ms = 0;
             }
-            opts.has_override = true;
         } else if (arg == "--no-self-check") {
             opts.no_self_check = true;
-            opts.has_override = true;
         } else if (arg == "--allow-all") {
             opts.allow_all = true;
         } else if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
@@ -975,7 +973,7 @@ int main(int argc, char** argv) {
 
                 if (!connect_opts.endpoint_override) {
                     Terminal::println("Connect target: daemon configuration (transport.server_endpoint/client.remote_endpoint)", Color::Yellow);
-                    const auto payload = connect_opts.has_override ? build_connect_payload(connect_opts) : std::string{};
+                    const auto payload = connect_opts.has_daemon_payload() ? build_connect_payload(connect_opts) : std::string{};
                     const auto outcome = send_command_and_print(client, "connect", payload);
                     rc = (outcome.ok && outcome.accepted) ? 0 : 1;
                 } else if (connect_opts.transport_explicit) {

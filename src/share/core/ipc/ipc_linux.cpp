@@ -464,7 +464,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Unix IPC Client (connect-per-request, no change needed)
+// Unix IPC Client (connect-per-request)
 // ---------------------------------------------------------------------------
 class UnixIpcClient : public IpcClient {
 public:

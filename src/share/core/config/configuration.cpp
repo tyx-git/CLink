@@ -93,6 +93,17 @@ std::string strip_inline_comment(std::string_view text) {
     return Configuration::trim(text);
 }
 
+std::string next_section_name(std::string_view section_header, std::map<std::string, int>& section_indices) {
+    const bool is_array = section_header.size() > 4 && section_header[1] == '[' && section_header[section_header.size() - 2] == ']';
+    if (is_array) {
+        std::string section_name = Configuration::trim(section_header.substr(2, section_header.size() - 4));
+        const int index = section_indices[section_name]++;
+        return section_name + "[" + std::to_string(index) + "]";
+    }
+
+    return Configuration::trim(section_header.substr(1, section_header.size() - 2));
+}
+
 }  // namespace
 
 Configuration Configuration::load_from_file(const std::filesystem::path& path) {
@@ -114,14 +125,7 @@ Configuration Configuration::load_from_file(const std::filesystem::path& path) {
         }
 
         if (trimmed.front() == '[' && trimmed.back() == ']') {
-            bool is_array = (trimmed.size() > 4 && trimmed[1] == '[' && trimmed[trimmed.size() - 2] == ']');
-            if (is_array) {
-                std::string section_name = trim(std::string_view{trimmed}.substr(2, trimmed.size() - 4));
-                int index = section_indices[section_name]++;
-                current_section = section_name + "[" + std::to_string(index) + "]";
-            } else {
-                current_section = trim(std::string_view{trimmed}.substr(1, trimmed.size() - 2));
-            }
+            current_section = next_section_name(trimmed, section_indices);
             continue;
         }
 
@@ -228,14 +232,7 @@ void Configuration::save() const {
         }
 
         if (trimmed.front() == '[' && trimmed.back() == ']') {
-            bool is_array = (trimmed.size() > 4 && trimmed[1] == '[' && trimmed[trimmed.size() - 2] == ']');
-            if (is_array) {
-                std::string section_name = trim(std::string_view{trimmed}.substr(2, trimmed.size() - 4));
-                int index = section_indices[section_name]++;
-                current_section = section_name + "[" + std::to_string(index) + "]";
-            } else {
-                current_section = trim(std::string_view{trimmed}.substr(1, trimmed.size() - 2));
-            }
+            current_section = next_section_name(trimmed, section_indices);
             output << l << "\n";
             continue;
         }
