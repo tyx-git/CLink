@@ -400,7 +400,13 @@ void TlsTransportListener::on_connection(NewConnectionCallback callback) {
 }
 
 void TlsTransportListener::do_accept() {
-    auto self = shared_from_this();
+    std::shared_ptr<TlsTransportListener> self;
+    try {
+        self = shared_from_this();
+    } catch (const std::bad_weak_ptr&) {
+        if (logger_) logger_->warn("[tls] stage=accept self_reference=unavailable");
+    }
+
     acceptor_.async_accept(io_context_,
         [this, self](std::error_code ec, asio::ip::tcp::socket socket) {
             if (!ec) {

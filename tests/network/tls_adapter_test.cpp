@@ -46,6 +46,19 @@ struct TlsTestContext {
     }
 };
 
+TEST_CASE("TLS listener can start when owned through TransportListener", "[network][tls]") {
+    asio::io_context io_context;
+    auto logger = std::make_shared<clink::core::logging::Logger>("TestLogger");
+    TransportListenerPtr listener = std::unique_ptr<TransportListener>(
+        std::make_unique<TlsTransportListener>(io_context, logger));
+
+    std::error_code ec;
+    REQUIRE_NOTHROW(ec = listener->listen("127.0.0.1:18443"));
+    REQUIRE_FALSE(ec);
+
+    listener->stop();
+}
+
 TEST_CASE("TLS Adapter Connection and Data Transfer", "[.tls][network]") {
     // Ensure certificates exist in config/certs/
     if (!std::filesystem::exists("config/certs/ca.crt")) {

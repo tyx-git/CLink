@@ -409,11 +409,11 @@ bool Application::apply_configuration() {
         if (!listener_changed) {
             logger_->info("[apply] stage=listener.skip_unchanged endpoint=" + endpoint);
         } else if (!endpoint.empty()) {
-            std::unique_ptr<network::TransportListener> listener;
+            network::TransportListenerPtr listener;
             logger_->info("[apply] stage=listener.prepare endpoint=" + endpoint);
 
             if (endpoint.rfind("tls://", 0) == 0) {
-                auto tls_listener = std::make_unique<network::TlsTransportListener>(io_context_, logger_);
+                auto tls_listener = std::make_shared<network::TlsTransportListener>(io_context_, logger_);
 
                 std::string ca_cert = configuration_.get_string("network.tls.ca_cert", "config/certs/ca.crt");
                 std::string server_cert = configuration_.get_string("network.tls.server_cert", "config/certs/server.crt");
@@ -432,7 +432,7 @@ bool Application::apply_configuration() {
                 endpoint = endpoint.substr(6); // 移除 tls://
                 logger_->info("[apply] stage=listener.transport tls endpoint=" + endpoint);
             } else {
-                listener = std::make_unique<network::TcpTransportListener>(io_context_, logger_);
+                listener = std::make_shared<network::TcpTransportListener>(io_context_, logger_);
                 if (endpoint.rfind("tcp://", 0) == 0) {
                     endpoint = endpoint.substr(6);
                 }

@@ -57,17 +57,17 @@ void ReliabilityEngine::ensure_timer() {
         return;
     }
 
-    if (logger_) logger_->info("[reliability] timer.ensure.enter tid=" + tid_str());
+    if (logger_) logger_->debug("[reliability] timer.ensure.enter tid=" + tid_str());
     std::call_once(timer_once_, [this]() {
         if (shutting_down_.load()) {
             if (logger_) logger_->warn("[reliability] timer.ensure.once skipped due to shutdown");
             return;
         }
-        if (logger_) logger_->info("[reliability] timer.ensure.once.begin tid=" + tid_str());
+        if (logger_) logger_->debug("[reliability] timer.ensure.once.begin tid=" + tid_str());
         timer_ = std::make_unique<asio::steady_timer>(io_context_);
-        if (logger_) logger_->info("[reliability] timer.ensure.once.ok tid=" + tid_str());
+        if (logger_) logger_->debug("[reliability] timer.ensure.once.ok tid=" + tid_str());
     });
-    if (logger_) logger_->info("[reliability] timer.ensure.exit tid=" + tid_str());
+    if (logger_) logger_->debug("[reliability] timer.ensure.exit tid=" + tid_str());
 }
 
 void ReliabilityEngine::start() {
@@ -90,7 +90,7 @@ void ReliabilityEngine::start_async(std::function<void(std::error_code)> on_star
     if (logger_) logger_->info("[reliability] start_async.post tid=" + tid_str());
 
     auto self = shared_from_this();
-    asio::post(io_context_, [self, cb = std::move(on_started)]() mutable {
+    asio::dispatch(io_context_, [self, cb = std::move(on_started)]() mutable {
         if (self->shutting_down_.load()) {
             if (self->logger_) self->logger_->warn("[reliability] start_async ignored during shutdown");
             if (cb) cb(std::make_error_code(std::errc::operation_canceled));
@@ -117,6 +117,7 @@ void ReliabilityEngine::start_async(std::function<void(std::error_code)> on_star
                 }
             }
 
+            self->timer_enabled_.store(enable_timer, std::memory_order_relaxed);
             if (enable_timer) {
                 self->ensure_timer();
                 if (self->logger_) self->logger_->info("[reliability.stage] start.timer.begin tid=" + tid_str());
@@ -143,13 +144,14 @@ void ReliabilityEngine::stop() {
     }
 
     running_ = false;
-    if (timer_) {
-        try {
+    try {
+        std::lock_guard<std::mutex> timer_lock(timer_mutex_);
+        if (timer_) {
             timer_->cancel();
-        } catch (const std::exception& ex) {
-            if (logger_) {
-                logger_->warn(std::string("[reliability] timer cancel exception during stop: ") + ex.what());
-            }
+        }
+    } catch (const std::exception& ex) {
+        if (logger_) {
+            logger_->warn(std::string("[reliability] timer cancel exception during stop: ") + ex.what());
         }
     }
 }
@@ -171,70 +173,85 @@ void ReliabilityEngine::start_timer() {
         return;
     }
 
-    if (logger_) logger_->info("[reliability.stage] timer.schedule tid=" + tid_str());
-    timer_->expires_after(std::chrono::milliseconds(50));
+    bool expected = false;
+    if (!timer_active_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    if (logger_) logger_->debug("[reliability.stage] timer.schedule tid=" + tid_str());
     auto self = shared_from_this();
-    timer_->async_wait([self](std::error_code ec) {
-        if (ec) {
-            if (self->logger_) self->logger_->info(std::string("[reliability.stage] timer.wait.cancelled ec=") + ec.message());
-            return;
-        }
+    {
+        std::lock_guard<std::mutex> timer_lock(timer_mutex_);
+        timer_->expires_after(std::chrono::milliseconds(50));
+        timer_->async_wait([self](std::error_code ec) {
+            self->timer_active_.store(false);
+            if (ec) {
+                if (self->logger_) self->logger_->debug(std::string("[reliability.stage] timer.wait.cancelled ec=") + ec.message());
+                return;
+            }
 
-        auto now = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> lock(self->queue_mutex_);
-        if (self->logger_) self->logger_->info("[reliability.stage] timer.tick unacked=" + std::to_string(self->unacked_packets_.size()));
+            auto now = std::chrono::steady_clock::now();
+            bool has_pending_packets = false;
+            {
+                std::lock_guard<std::mutex> lock(self->queue_mutex_);
+                has_pending_packets = !self->unacked_packets_.empty();
+                if (self->logger_) self->logger_->debug("[reliability.stage] timer.tick unacked=" + std::to_string(self->unacked_packets_.size()));
 
-        for (auto& [seq, entry] : self->unacked_packets_) {
-            // 1. 处理尚未进行初始发送的包 (受限于 CWND 和速率)
-            if (!entry.sent) {
-                bool can_send = false;
-                {
-                    std::lock_guard<std::mutex> stats_lock(self->stats_mutex_);
-                    if (in_flight_packet_count_locked(self->unacked_packets_) < self->stats_.cwnd) {
-                        can_send = true;
-                    }
-                }
-                
-                if (can_send) {
-                    size_t packet_size = sizeof(PacketHeader) + entry.packet->header.payload_size;
-                    if (self->rate_limiter_ && self->rate_limiter_->consume(packet_size)) {
-                        entry.sent = true;
-                        entry.last_send_time = now;
-                        if (self->send_fn_) self->send_fn_(*entry.packet);
+                for (auto& [seq, entry] : self->unacked_packets_) {
+                    // 1. 处理尚未进行初始发送的包 (受限于 CWND 和速率)
+                    if (!entry.sent) {
+                        bool can_send = false;
+                        {
+                            std::lock_guard<std::mutex> stats_lock(self->stats_mutex_);
+                            if (in_flight_packet_count_locked(self->unacked_packets_) < self->stats_.cwnd) {
+                                can_send = true;
+                            }
+                        }
+
+                        if (can_send) {
+                            size_t packet_size = sizeof(PacketHeader) + entry.packet->header.payload_size;
+                            if (self->rate_limiter_ && self->rate_limiter_->consume(packet_size)) {
+                                entry.sent = true;
+                                entry.last_send_time = now;
+                                if (self->send_fn_) self->send_fn_(*entry.packet);
+                                continue;
+                            }
+                        }
                         continue;
                     }
+
+                    // 2. 处理超时重传
+                    auto current_rto = std::max(entry.current_timeout, self->get_stats().rto);
+                    if (std::chrono::steady_clock::now() - entry.last_send_time >= current_rto) {
+                        if (entry.retry_count >= self->max_retries_) {
+                            if (self->logger_) self->logger_->error("[reliability] max retries reached for seq " + std::to_string(seq));
+                            continue;
+                        }
+
+                        size_t packet_size = sizeof(PacketHeader) + entry.packet->header.payload_size;
+                        if (self->rate_limiter_ && !self->rate_limiter_->consume(packet_size)) continue;
+
+                        entry.retry_count++;
+                        {
+                            std::lock_guard<std::mutex> stats_lock(self->stats_mutex_);
+                            self->stats_.retransmission_count++;
+                            self->stats_.ssthresh = std::max(self->stats_.cwnd / 2, 2u);
+                            self->stats_.cwnd = 2;
+                        }
+                        entry.current_timeout = std::min(entry.current_timeout * 2, self->max_rto_);
+                        entry.last_send_time = std::chrono::steady_clock::now();
+
+                        if (self->logger_) self->logger_->warn("[reliability] retransmitting seq " + std::to_string(seq));
+                        if (self->send_fn_) self->send_fn_(*entry.packet);
+                    }
                 }
-                continue;
             }
 
-            // 2. 处理超时重传
-            auto current_rto = std::max(entry.current_timeout, self->get_stats().rto);
-            if (std::chrono::steady_clock::now() - entry.last_send_time >= current_rto) {
-                if (entry.retry_count >= self->max_retries_) {
-                    if (self->logger_) self->logger_->error("[reliability] max retries reached for seq " + std::to_string(seq));
-                    continue;
-                }
-
-                size_t packet_size = sizeof(PacketHeader) + entry.packet->header.payload_size;
-                if (self->rate_limiter_ && !self->rate_limiter_->consume(packet_size)) continue;
-
-                entry.retry_count++;
-                {
-                    std::lock_guard<std::mutex> stats_lock(self->stats_mutex_);
-                    self->stats_.retransmission_count++;
-                    self->stats_.ssthresh = std::max(self->stats_.cwnd / 2, 2u);
-                    self->stats_.cwnd = 2;
-                }
-                entry.current_timeout = std::min(entry.current_timeout * 2, self->max_rto_);
-                entry.last_send_time = std::chrono::steady_clock::now();
-
-                if (self->logger_) self->logger_->warn("[reliability] retransmitting seq " + std::to_string(seq));
-                if (self->send_fn_) self->send_fn_(*entry.packet);
+            if (has_pending_packets) {
+                self->start_timer();
             }
-        }
-
-        self->start_timer();
-    });
+        });
+    }
 }
 
 void ReliabilityEngine::set_rate_limit(size_t bytes_per_second, size_t burst_size) {
@@ -305,6 +322,10 @@ void ReliabilityEngine::send_reliable(PacketType type, std::shared_ptr<clink::co
                 unacked_packets_[seq].sent = false;
             }
         }
+    }
+
+    if (timer_enabled_.load(std::memory_order_relaxed)) {
+        start_timer();
     }
 }
 

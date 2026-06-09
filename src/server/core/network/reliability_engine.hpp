@@ -145,7 +145,9 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> timer_enabled_{true};
+    std::atomic<bool> timer_active_{false};
     std::unique_ptr<asio::steady_timer> timer_;
+    std::mutex timer_mutex_;
     std::once_flag timer_once_;
 
     // 指数退避参数

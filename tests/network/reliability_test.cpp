@@ -39,6 +39,63 @@ struct TestContext {
     }
 };
 
+TEST_CASE("ReliabilityEngine start_async can be called from io_context thread", "[network][reliability]") {
+    asio::io_context io_context;
+    auto engine = std::make_shared<ReliabilityEngine>(io_context, nullptr, [](const Packet&) {});
+
+    bool started = false;
+    asio::post(io_context, [&]() {
+        engine->start_async([&](std::error_code ec) {
+            REQUIRE_FALSE(ec);
+            started = true;
+        });
+    });
+
+    io_context.run_for(std::chrono::milliseconds(120));
+
+    CHECK(started);
+    engine->stop();
+}
+
+TEST_CASE("ReliabilityEngine idle timer does not reschedule without pending packets", "[network][reliability]") {
+    asio::io_context io_context;
+    auto engine = std::make_shared<ReliabilityEngine>(io_context, nullptr, [](const Packet&) {});
+
+    bool started = false;
+    engine->start_async([&](std::error_code ec) {
+        REQUIRE_FALSE(ec);
+        started = true;
+    });
+
+    auto handled = io_context.run_for(std::chrono::milliseconds(160));
+
+    REQUIRE(started);
+    CHECK(handled <= 2);
+    engine->stop();
+}
+
+TEST_CASE("ReliabilityEngine restarts idle timer when new packets are queued", "[network][reliability]") {
+    asio::io_context io_context;
+    auto engine = std::make_shared<ReliabilityEngine>(io_context, nullptr, [](const Packet&) {});
+
+    bool started = false;
+    engine->start_async([&](std::error_code ec) {
+        REQUIRE_FALSE(ec);
+        started = true;
+    });
+
+    auto idle_handled = io_context.run_for(std::chrono::milliseconds(120));
+    REQUIRE(started);
+    CHECK(idle_handled <= 2);
+
+    engine->send_reliable(PacketType::Data, make_block({1, 2, 3}));
+    io_context.restart();
+    io_context.run_for(std::chrono::milliseconds(320));
+
+    CHECK(engine->get_stats().retransmission_count >= 1);
+    engine->stop();
+}
+
 TEST_CASE("ReliabilityEngine SACK and Congestion Control", "[network][reliability]") {
     TestContext ctx;
     auto& io_context = ctx.io_context;
