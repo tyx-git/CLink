@@ -5,9 +5,74 @@
 #include <thread>
 #include <future>
 #include <iostream>
+#include <cstdlib>
+#include <chrono>
 
 using namespace clink::server::modules;
 using namespace clink::core::logging;
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value) : name_(name) {
+#if defined(_WIN32)
+        // Use _putenv (MSVCRT) rather than SetEnvironmentVariableA (Win32 API)
+        // so that std::getenv (which reads the CRT block) picks up the change.
+        const char* existing = std::getenv(name);
+        if (existing) {
+            old_value_ = existing;
+        }
+        std::string assign = name_ + "=" + value;
+        // _putenv expects a pointer it can store; we must keep the buffer alive.
+        // Allocate a copy that will be freed in the destructor.
+        env_buf_ = assign;
+        _putenv(env_buf_->c_str());
+#else
+        if (const char* existing = std::getenv(name)) {
+            old_value_ = existing;
+        }
+        setenv(name, value, 1);
+#endif
+    }
+
+    ~ScopedEnvVar() {
+#if defined(_WIN32)
+        // Restore previous value using _putenv.
+        // The new env_buf_ replaces the old assignment in the CRT block.
+        std::string restore;
+        if (old_value_) {
+            restore = name_ + "=" + *old_value_;
+        } else {
+            restore = name_ + "=";
+        }
+        env_buf_ = restore;
+        _putenv(env_buf_->c_str());
+#else
+        if (old_value_) {
+            setenv(name_.c_str(), old_value_->c_str(), 1);
+        } else {
+            unsetenv(name_.c_str());
+        }
+#endif
+    }
+
+private:
+    std::string name_;
+    std::optional<std::string> old_value_;
+    std::optional<std::string> env_buf_;  // keeps the _putenv buffer alive
+};
+
+TEST_CASE("SocksSession skips VIP bind when VIF is disabled", "[socks]") {
+    ScopedEnvVar disable_vif("CLINK_DISABLE_VIF", "1");
+
+    CHECK_FALSE(should_bind_to_virtual_interface_for_socks("10.8.0.1"));
+}
+
+TEST_CASE("SocksSession allows VIP bind when VIF is enabled", "[socks]") {
+    ScopedEnvVar enable_vif("CLINK_DISABLE_VIF", "0");
+
+    CHECK(should_bind_to_virtual_interface_for_socks("10.8.0.1"));
+    CHECK_FALSE(should_bind_to_virtual_interface_for_socks(""));
+}
 
 TEST_CASE("SocksServer Handshake and Connect", "[socks]") {
     asio::io_context io_context;

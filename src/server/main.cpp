@@ -145,6 +145,18 @@ bool relaunch_as_admin_if_needed(int argc, char** argv) {
         }
     }
 
+    // Use GetModuleFileNameA to obtain the full executable path instead of
+    // relying on argv[0] which may be a relative path.  This ensures the
+    // elevated process can always find the correct binary.
+    char exe_path[MAX_PATH];
+    const DWORD exe_len = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+    if (exe_len == 0 || exe_len >= MAX_PATH) {
+        std::cerr << "Failed to obtain executable path for elevation (err="
+                  << GetLastError() << ")." << std::endl;
+        std::cerr << "Please run this program as Administrator manually to enable VIF." << std::endl;
+        return false;
+    }
+
     std::string params;
     for (int i = 1; i < argc; ++i) {
         if (!params.empty()) {
@@ -157,17 +169,28 @@ bool relaunch_as_admin_if_needed(int argc, char** argv) {
     }
     params += "--elevated";
 
+    // Preserve the current working directory so the elevated instance can
+    // locate relative-path resources (config, certs, logs, etc.).  Without
+    // this the elevated process defaults to %WINDIR%\System32.
+    char cwd[MAX_PATH];
+    const DWORD cwd_len = GetCurrentDirectoryA(MAX_PATH, cwd);
+
     SHELLEXECUTEINFOA sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = "runas";
-    sei.lpFile = argv[0];
+    sei.lpFile = exe_path;
     sei.lpParameters = params.c_str();
+    sei.lpDirectory = (cwd_len > 0 && cwd_len < MAX_PATH) ? cwd : nullptr;
     sei.nShow = SW_SHOWNORMAL;
 
     if (!ShellExecuteExA(&sei)) {
         const DWORD err = GetLastError();
         std::cerr << "Elevation request failed err=" << err << std::endl;
+        if (err == ERROR_CANCELLED) {
+            std::cerr << "UAC prompt was denied by the user." << std::endl;
+            std::cerr << "VIF virtual-interface features will NOT be available." << std::endl;
+        }
         std::cerr << "Please run this program as Administrator to enable VIF auto-create." << std::endl;
         return false;
     }

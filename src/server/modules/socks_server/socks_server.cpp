@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -9,6 +10,20 @@
 #endif
 
 namespace clink::server::modules {
+
+bool should_bind_to_virtual_interface_for_socks(const std::string& vip) {
+    if (vip.empty()) {
+        return false;
+    }
+
+    if (const char* disable_vif = std::getenv("CLINK_DISABLE_VIF")) {
+        if (std::string(disable_vif) == "1") {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 SocksSession::SocksSession(asio::io_context& io_context, asio::ip::tcp::socket socket, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager)
     : io_context_(io_context),
@@ -173,13 +188,19 @@ void SocksSession::do_connect(std::string host, std::string port) {
             // If SessionManager is available and VIP is set, bind to it.
             if (session_manager_) {
                 std::string vip = session_manager_->get_virtual_interface_address();
-                if (!vip.empty()) {
+                if (should_bind_to_virtual_interface_for_socks(vip)) {
                     asio::error_code addr_ec;
                     auto bind_addr = asio::ip::make_address(vip, addr_ec);
                     if (!addr_ec) {
                         asio::error_code open_ec;
                         asio::error_code bind_ec;
-                        remote_socket_.open(results.begin()->endpoint().protocol(), open_ec);
+                        // Open the socket with the same address family as the VIP
+                        // (e.g. IPv4 for 10.8.0.1).  Using the remote endpoint's
+                        // family would fail on Windows when VIP is IPv4 but the
+                        // remote resolved to IPv6 (WSAEFAULT / invalid pointer).
+                        auto protocol = bind_addr.is_v4() ? asio::ip::tcp::v4()
+                                                          : asio::ip::tcp::v6();
+                        remote_socket_.open(protocol, open_ec);
                         if (!open_ec) {
                             remote_socket_.bind(asio::ip::tcp::endpoint(bind_addr, 0), bind_ec);
                             if (bind_ec) {

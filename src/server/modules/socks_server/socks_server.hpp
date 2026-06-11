@@ -13,6 +13,8 @@
 
 namespace clink::server::modules {
 
+bool should_bind_to_virtual_interface_for_socks(const std::string& vip);
+
 class SocksSession : public std::enable_shared_from_this<SocksSession> {
 public:
     SocksSession(asio::io_context& io_context, asio::ip::tcp::socket socket, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager = nullptr);

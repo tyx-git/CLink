@@ -1,12 +1,21 @@
 #include <catch2/catch_test_macros.hpp>
+#include <algorithm>
+#include <asio.hpp>
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <thread>
+#include <vector>
+#define private public
 #include "src/server/core/network/reliability_engine.hpp"
+#undef private
 #include "src/share/core/network/packet.hpp"
 #include "src/server/core/memory/buffer_pool.hpp"
 #include <iostream>
-#include <vector>
-#include <memory>
-#include <chrono>
-#include <thread>
 
 using namespace clink::core::network;
 
@@ -38,6 +47,41 @@ struct TestContext {
         }
     }
 };
+
+TEST_CASE("ReliabilityEngine drops packets after max retries to stop retry spam", "[network][reliability]") {
+    asio::io_context io_context;
+    std::size_t sent_count = 0;
+    auto engine = std::make_shared<ReliabilityEngine>(io_context, nullptr, [&](const Packet&) {
+        ++sent_count;
+    });
+
+    engine->start_async([](std::error_code ec) {
+        REQUIRE_FALSE(ec);
+    });
+    io_context.run_for(std::chrono::milliseconds(20));
+    io_context.restart();
+
+    engine->send_reliable(PacketType::Data, make_block({1, 2, 3}));
+
+    {
+        std::lock_guard<std::mutex> lock(engine->queue_mutex_);
+        REQUIRE(engine->unacked_packets_.size() == 1);
+        auto& entry = engine->unacked_packets_.begin()->second;
+        entry.sent = true;
+        entry.retry_count = engine->max_retries_;
+        entry.last_send_time = std::chrono::steady_clock::now() - engine->max_rto_;
+        entry.current_timeout = std::chrono::milliseconds(1);
+    }
+
+    io_context.run_for(std::chrono::milliseconds(160));
+
+    {
+        std::lock_guard<std::mutex> lock(engine->queue_mutex_);
+        CHECK(engine->unacked_packets_.empty());
+    }
+    CHECK(sent_count == 1);
+    engine->stop();
+}
 
 TEST_CASE("ReliabilityEngine start_async can be called from io_context thread", "[network][reliability]") {
     asio::io_context io_context;

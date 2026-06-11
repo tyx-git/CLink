@@ -197,7 +197,9 @@ void ReliabilityEngine::start_timer() {
                 has_pending_packets = !self->unacked_packets_.empty();
                 if (self->logger_) self->logger_->debug("[reliability.stage] timer.tick unacked=" + std::to_string(self->unacked_packets_.size()));
 
-                for (auto& [seq, entry] : self->unacked_packets_) {
+                for (auto it = self->unacked_packets_.begin(); it != self->unacked_packets_.end();) {
+                    auto& seq = it->first;
+                    auto& entry = it->second;
                     // 1. 处理尚未进行初始发送的包 (受限于 CWND 和速率)
                     if (!entry.sent) {
                         bool can_send = false;
@@ -214,9 +216,11 @@ void ReliabilityEngine::start_timer() {
                                 entry.sent = true;
                                 entry.last_send_time = now;
                                 if (self->send_fn_) self->send_fn_(*entry.packet);
+                                ++it;
                                 continue;
                             }
                         }
+                        ++it;
                         continue;
                     }
 
@@ -225,11 +229,15 @@ void ReliabilityEngine::start_timer() {
                     if (std::chrono::steady_clock::now() - entry.last_send_time >= current_rto) {
                         if (entry.retry_count >= self->max_retries_) {
                             if (self->logger_) self->logger_->error("[reliability] max retries reached for seq " + std::to_string(seq));
+                            it = self->unacked_packets_.erase(it);
                             continue;
                         }
 
                         size_t packet_size = sizeof(PacketHeader) + entry.packet->header.payload_size;
-                        if (self->rate_limiter_ && !self->rate_limiter_->consume(packet_size)) continue;
+                        if (self->rate_limiter_ && !self->rate_limiter_->consume(packet_size)) {
+                            ++it;
+                            continue;
+                        }
 
                         entry.retry_count++;
                         {
@@ -244,6 +252,7 @@ void ReliabilityEngine::start_timer() {
                         if (self->logger_) self->logger_->warn("[reliability] retransmitting seq " + std::to_string(seq));
                         if (self->send_fn_) self->send_fn_(*entry.packet);
                     }
+                    ++it;
                 }
             }
 
