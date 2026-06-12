@@ -54,6 +54,7 @@ add_library(clink-core STATIC
     server/core/network/virtual_interface.cpp
     server/core/network/tcp_adapter.cpp
     server/core/network/tls_adapter.cpp
+    server/core/network/vip_bind.cpp
     server/core/network/acl.cpp
     server/core/network/rate_limiter.cpp
     server/core/network/reliability_engine.cpp
