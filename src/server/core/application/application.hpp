@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -89,6 +90,9 @@ private:
     asio::io_context io_context_;
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> io_work_;
     std::thread io_thread_;
+    mutable std::mutex io_thread_state_mutex_;
+    std::condition_variable io_thread_stopped_cv_;
+    bool io_thread_stopped_{false};
     asio::steady_timer config_watcher_timer_{io_context_};
 
     ApplicationOptions options_{};
