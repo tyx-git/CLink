@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstring>
 #include <iostream>
+#include <chrono>
 
 using namespace clink::core::network;
 
@@ -14,7 +15,7 @@ TEST_CASE("TcpTransportAdapter Framing", "[network][tcp]") {
         auto logger = std::make_shared<clink::core::logging::Logger>("test");
     
     // Start a listener
-    TcpTransportListener listener(io_context, logger);
+    auto listener = std::make_shared<TcpTransportListener>(io_context, logger);
     std::string endpoint = "127.0.0.1:0"; // Random port
     
     std::promise<std::string> port_promise;
@@ -23,7 +24,7 @@ TEST_CASE("TcpTransportAdapter Framing", "[network][tcp]") {
     std::promise<std::shared_ptr<TcpTransportAdapter>> server_adapter_promise;
     auto server_adapter_future = server_adapter_promise.get_future();
     
-    listener.on_connection([&](std::shared_ptr<TransportAdapter> adapter) {
+    listener->on_connection([&](std::shared_ptr<TransportAdapter> adapter) {
         auto tcp_adapter = std::dynamic_pointer_cast<TcpTransportAdapter>(adapter);
         server_adapter_promise.set_value(tcp_adapter);
     });
@@ -44,7 +45,7 @@ TEST_CASE("TcpTransportAdapter Framing", "[network][tcp]") {
     std::error_code ec;
     while (port < 60000) {
         endpoint = "127.0.0.1:" + std::to_string(port);
-        ec = listener.listen(endpoint);
+        ec = listener->listen(endpoint);
         if (!ec) break;
         port++;
     }
@@ -121,3 +122,21 @@ TEST_CASE("TcpTransportAdapter Framing", "[network][tcp]") {
             
             // Cleanup handled by RAII
         }
+
+TEST_CASE("TcpTransportListener can be stopped with a pending accept", "[network][tcp][listener]") {
+    asio::io_context io;
+    auto logger = std::make_shared<clink::core::logging::Logger>("tcp-listener-lifecycle-test");
+    auto listener = std::make_shared<clink::core::network::TcpTransportListener>(io, logger);
+
+    const auto ec = listener->listen("127.0.0.1:0");
+    REQUIRE_FALSE(ec);
+
+    listener->on_connection([](clink::core::network::TransportAdapterPtr) {
+        FAIL("no connection should be accepted after listener stop");
+    });
+
+    listener->stop();
+    listener.reset();
+
+    CHECK_NOTHROW(io.run_for(std::chrono::milliseconds(50)));
+}

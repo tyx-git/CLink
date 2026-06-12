@@ -59,7 +59,7 @@ private:
 /**
  * @brief 基础 TCP 监听器实现 (Asynchronous)
  */
-class TcpTransportListener : public TransportListener {
+class TcpTransportListener : public TransportListener, public std::enable_shared_from_this<TcpTransportListener> {
 public:
     explicit TcpTransportListener(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger);
     ~TcpTransportListener() override;
