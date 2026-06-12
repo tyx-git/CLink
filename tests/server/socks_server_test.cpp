@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include "src/server/modules/socks_server/socks_server.hpp"
+#include "src/server/core/network/vip_bind.hpp"
 #include "src/share/core/logging/logger.hpp"
 #include <asio.hpp>
 #include <thread>
@@ -7,6 +8,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <chrono>
+#include <vector>
 
 using namespace clink::server::modules;
 using namespace clink::core::logging;
@@ -72,6 +74,23 @@ TEST_CASE("SocksSession allows VIP bind when VIF is enabled", "[socks]") {
 
     CHECK(should_bind_to_virtual_interface_for_socks("10.8.0.1"));
     CHECK_FALSE(should_bind_to_virtual_interface_for_socks(""));
+}
+
+TEST_CASE("SocksSession filters remote endpoints to VIP address family", "[socks]") {
+    std::vector<asio::ip::tcp::endpoint> endpoints{
+        asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 80),
+        asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), 80),
+    };
+    const auto mixed = asio::ip::tcp::resolver::results_type::create(
+        endpoints.begin(), endpoints.end(), "localhost", "80");
+
+    const auto filtered = clink::core::network::filter_results_for_bind_address(
+        mixed, asio::ip::address_v4::loopback());
+
+    REQUIRE_FALSE(filtered.empty());
+    for (const auto& entry : filtered) {
+        CHECK(entry.endpoint().address().is_v4());
+    }
 }
 
 TEST_CASE("SocksServer Handshake and Connect", "[socks]") {
