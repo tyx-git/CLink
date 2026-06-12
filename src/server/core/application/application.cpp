@@ -1584,6 +1584,12 @@ void Application::disconnect_session() {
                   " reason=disconnect_command active_count=" + std::to_string(summary.active_count) +
                   " handshaking_count=" + std::to_string(summary.handshaking_count));
     if (next_state == SessionState::Disconnected) {
+        {
+            std::lock_guard<std::mutex> lock(control_state_mutex_);
+            last_connect_phase_ = control_plane::kStatusIdle;
+            last_connect_reason_ = control_plane::kValueNone;
+            last_connect_message_.clear();
+        }
         logger_->info("Session disconnected");
     }
 }
