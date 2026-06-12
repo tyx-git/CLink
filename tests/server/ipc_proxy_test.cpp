@@ -3,6 +3,7 @@
 #include <thread>
 #include <future>
 #include <iostream>
+#include "src/server/core/network/vip_bind.hpp"
 #include "src/server/modules/process_manager/process_manager.hpp"
 #include "src/server/modules/process_manager/ipc_proxy_session.hpp"
 #include "src/server/modules/process_inject/include/process_ipc_server.hpp"
@@ -30,6 +31,23 @@ public:
 
     void close() override {}
 };
+
+TEST_CASE("IpcProxySession VIP helper filters endpoints by address family", "[server][ipc][vip]") {
+    std::vector<asio::ip::tcp::endpoint> endpoints{
+        asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 443),
+        asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), 443),
+    };
+    const auto mixed = asio::ip::tcp::resolver::results_type::create(
+        endpoints.begin(), endpoints.end(), "localhost", "443");
+
+    const auto filtered = clink::core::network::filter_results_for_bind_address(
+        mixed, asio::ip::address_v6::loopback());
+
+    REQUIRE_FALSE(filtered.empty());
+    for (const auto& entry : filtered) {
+        CHECK(entry.endpoint().address().is_v6());
+    }
+}
 
 TEST_CASE("IpcProxySession Data Flow", "[server][ipc]") {
     asio::io_context io_context;

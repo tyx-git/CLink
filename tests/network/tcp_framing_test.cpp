@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <chrono>
+#include <stdexcept>
 
 using namespace clink::core::network;
 
@@ -14,58 +15,43 @@ TEST_CASE("TcpTransportAdapter Framing", "[network][tcp]") {
         asio::io_context io_context;
         auto logger = std::make_shared<clink::core::logging::Logger>("test");
     
-    // Start a listener
-    auto listener = std::make_shared<TcpTransportListener>(io_context, logger);
-    std::string endpoint = "127.0.0.1:0"; // Random port
-    
-    std::promise<std::string> port_promise;
-    auto port_future = port_promise.get_future();
-    
+    asio::ip::tcp::acceptor acceptor(
+        io_context,
+        asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+    const auto port = acceptor.local_endpoint().port();
+
     std::promise<std::shared_ptr<TcpTransportAdapter>> server_adapter_promise;
     auto server_adapter_future = server_adapter_promise.get_future();
-    
-    listener->on_connection([&](std::shared_ptr<TransportAdapter> adapter) {
-        auto tcp_adapter = std::dynamic_pointer_cast<TcpTransportAdapter>(adapter);
-        server_adapter_promise.set_value(tcp_adapter);
+
+    std::jthread io_thread([&](std::stop_token st) {
+        std::stop_callback cb(st, [&]() {
+            io_context.stop();
+        });
+
+        asio::ip::tcp::socket server_socket(io_context);
+        asio::error_code accept_ec;
+        acceptor.accept(server_socket, accept_ec);
+        if (accept_ec) {
+            server_adapter_promise.set_exception(
+                std::make_exception_ptr(std::runtime_error(accept_ec.message())));
+            return;
+        }
+
+        auto adapter = std::make_shared<TcpTransportAdapter>(io_context, logger, std::move(server_socket));
+        adapter->start();
+        server_adapter_promise.set_value(adapter);
+        io_context.run();
     });
-    
-    // We need to bind first to get the port
-    // But TcpTransportListener::listen binds and accepts.
-    // We can't get the port easily unless we parse the log or modify listener.
-    // Let's modify the test to use a known port or try to find a free one.
-    // Or just let listener pick one and we need to find out what it is.
-    // TcpTransportListener doesn't expose the port.
-    // Wait, TcpTransportListener::listen takes an endpoint string.
-    // If we pass "127.0.0.1:0", asio will pick a port.
-    // But we don't know it.
-    
-    // Workaround: Use a random port between 50000 and 60000
-    // Simple retry loop
-    int port = 50000;
-    std::error_code ec;
-    while (port < 60000) {
-        endpoint = "127.0.0.1:" + std::to_string(port);
-        ec = listener->listen(endpoint);
-        if (!ec) break;
-        port++;
-    }
-    REQUIRE(!ec);
-    
-    // Start IO context in background
-            std::jthread io_thread([&](std::stop_token st) {
-                std::stop_callback cb(st, [&]() {
-                    io_context.stop();
-                });
-                io_context.run();
-            });
-    
+
     // Create a raw socket client to send fragmented data
     asio::io_context client_ioc;
     asio::ip::tcp::socket client_socket(client_ioc);
-    asio::ip::tcp::endpoint server_ep(asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port));
-    
-    client_socket.connect(server_ep);
-    
+    asio::ip::tcp::endpoint server_ep(asio::ip::make_address("127.0.0.1"), port);
+
+    asio::error_code connect_ec;
+    client_socket.connect(server_ep, connect_ec);
+    REQUIRE_FALSE(connect_ec);
+
     // Wait for server to accept
     auto server_adapter = server_adapter_future.get();
     REQUIRE(server_adapter != nullptr);
