@@ -851,11 +851,21 @@ void Application::run() {
 
     log_lifecycle("entering event loop");
 
+    {
+        std::lock_guard<std::mutex> lock(io_thread_state_mutex_);
+        io_thread_stopped_ = false;
+    }
+
     // Start Asio I/O thread
     io_thread_ = std::thread([this]() {
         logger_->info("[app] asio io_context started");
         io_context_.run();
         logger_->info("[app] asio io_context stopped");
+        {
+            std::lock_guard<std::mutex> lock(io_thread_state_mutex_);
+            io_thread_stopped_ = true;
+        }
+        io_thread_stopped_cv_.notify_all();
     });
 
     start_modules();
@@ -895,31 +905,38 @@ void Application::shutdown(std::chrono::milliseconds timeout) {
         ipc_client_.reset();
     }
 
-    // Stop modules first, then I/O thread/resources
+    if (process_manager_) {
+        auto pm = std::static_pointer_cast<clink::server::modules::ProcessManager>(process_manager_);
+        if (pm) {
+            pm->stop();
+        }
+        process_manager_.reset();
+    }
+
+    // Stop modules first, then network resources, then I/O thread/resources.
     stop_modules();
 
-    // Stop Asio with timeout
-    io_work_.reset();
-    io_context_.stop();
-    if (io_thread_.joinable()) {
-        if (timeout.count() > 0) {
-            auto deadline = std::chrono::steady_clock::now() + timeout;
-            while (io_thread_.joinable() && std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                // Check if thread finished
-                // Note: std::thread has no try_join, so we poll with sleep
-            }
-            if (io_thread_.joinable()) {
-                log_lifecycle("shutdown timeout reached, I/O thread still running");
-            }
-        }
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
-    }
+    config_watcher_timer_.cancel();
 
     if (session_manager_) {
         session_manager_->shutdown();
+    }
+
+    // Stop Asio with timeout.
+    io_work_.reset();
+    io_context_.stop();
+    if (io_thread_.joinable()) {
+        bool stopped = false;
+        if (timeout.count() > 0) {
+            std::unique_lock<std::mutex> lock(io_thread_state_mutex_);
+            stopped = io_thread_stopped_cv_.wait_for(lock, timeout, [this]() {
+                return io_thread_stopped_;
+            });
+            if (!stopped) {
+                log_lifecycle("shutdown timeout reached, I/O thread still running");
+            }
+        }
+        io_thread_.join();
     }
 
 #ifdef _WIN32
@@ -1567,6 +1584,12 @@ void Application::disconnect_session() {
                   " reason=disconnect_command active_count=" + std::to_string(summary.active_count) +
                   " handshaking_count=" + std::to_string(summary.handshaking_count));
     if (next_state == SessionState::Disconnected) {
+        {
+            std::lock_guard<std::mutex> lock(control_state_mutex_);
+            last_connect_phase_ = control_plane::kStatusIdle;
+            last_connect_reason_ = control_plane::kValueNone;
+            last_connect_message_.clear();
+        }
         logger_->info("Session disconnected");
     }
 }

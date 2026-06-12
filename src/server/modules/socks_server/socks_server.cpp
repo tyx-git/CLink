@@ -1,4 +1,5 @@
 #include "src/server/modules/socks_server/socks_server.hpp"
+#include "src/server/core/network/vip_bind.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -12,17 +13,7 @@
 namespace clink::server::modules {
 
 bool should_bind_to_virtual_interface_for_socks(const std::string& vip) {
-    if (vip.empty()) {
-        return false;
-    }
-
-    if (const char* disable_vif = std::getenv("CLINK_DISABLE_VIF")) {
-        if (std::string(disable_vif) == "1") {
-            return false;
-        }
-    }
-
-    return true;
+    return clink::core::network::should_bind_to_virtual_interface(vip);
 }
 
 SocksSession::SocksSession(asio::io_context& io_context, asio::ip::tcp::socket socket, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager)
@@ -185,39 +176,24 @@ void SocksSession::do_connect(std::string host, std::string port) {
                 return;
             }
 
-            // If SessionManager is available and VIP is set, bind to it.
+            auto connect_results = results;
+
             if (session_manager_) {
-                std::string vip = session_manager_->get_virtual_interface_address();
-                if (should_bind_to_virtual_interface_for_socks(vip)) {
-                    asio::error_code addr_ec;
-                    auto bind_addr = asio::ip::make_address(vip, addr_ec);
-                    if (!addr_ec) {
-                        asio::error_code open_ec;
-                        asio::error_code bind_ec;
-                        // Open the socket with the same address family as the VIP
-                        // (e.g. IPv4 for 10.8.0.1).  Using the remote endpoint's
-                        // family would fail on Windows when VIP is IPv4 but the
-                        // remote resolved to IPv6 (WSAEFAULT / invalid pointer).
-                        auto protocol = bind_addr.is_v4() ? asio::ip::tcp::v4()
-                                                          : asio::ip::tcp::v6();
-                        remote_socket_.open(protocol, open_ec);
-                        if (!open_ec) {
-                            remote_socket_.bind(asio::ip::tcp::endpoint(bind_addr, 0), bind_ec);
-                            if (bind_ec) {
-                                if (logger_) {
-                                    logger_->warn("Failed to bind to VIP " + vip + ": " + bind_ec.message());
-                                }
-                                asio::error_code close_ec;
-                                remote_socket_.close(close_ec);
-                            }
+                const std::string vip = session_manager_->get_virtual_interface_address();
+                auto bind_addr = clink::core::network::parse_bind_address(vip, logger_, "[socks]");
+                if (bind_addr) {
+                    auto filtered = clink::core::network::filter_results_for_bind_address(results, *bind_addr);
+                    if (filtered.empty()) {
+                        if (logger_) {
+                            logger_->warn("[socks] no remote endpoints match VIP address family vip=" + bind_addr->to_string());
                         }
-                    } else if (logger_) {
-                        logger_->warn("Invalid VIP address " + vip + ": " + addr_ec.message());
+                    } else if (clink::core::network::bind_socket_to_virtual_interface(remote_socket_, *bind_addr, logger_, "[socks]")) {
+                        connect_results = std::move(filtered);
                     }
                 }
             }
 
-            asio::async_connect(remote_socket_, results,
+            asio::async_connect(remote_socket_, connect_results,
                 [this, self](std::error_code ec2, asio::ip::tcp::endpoint) {
                     if (!ec2) {
                         static const uint8_t response[] = {0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0};

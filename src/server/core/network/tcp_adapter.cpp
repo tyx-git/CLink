@@ -317,7 +317,9 @@ void TcpTransportListener::stop() {
         if (logger_) {
             logger_->info("[tcp] stage=listen.stop status=begin endpoint=" + listen_endpoint_);
         }
+        connection_callback_ = nullptr;
         std::error_code ec;
+        acceptor_.cancel(ec);
         acceptor_.close(ec);
     }
 }
@@ -327,19 +329,26 @@ void TcpTransportListener::on_connection(NewConnectionCallback callback) {
 }
 
 void TcpTransportListener::do_accept() {
+    if (!running_.load() || !acceptor_.is_open()) {
+        return;
+    }
+
+    auto self = shared_from_this();
     acceptor_.async_accept(
-        [this](std::error_code ec, asio::ip::tcp::socket socket) {
+        [self](std::error_code ec, asio::ip::tcp::socket socket) {
             if (!ec) {
-                if (connection_callback_) {
-                    auto adapter = std::make_shared<TcpTransportAdapter>(io_context_, logger_, std::move(socket));
+                if (self->running_.load() && self->connection_callback_) {
+                    auto adapter = std::make_shared<TcpTransportAdapter>(self->io_context_, self->logger_, std::move(socket));
                     // Start receiving after adapter construction is complete (safe for shared_from_this)
                     adapter->start();
-                    connection_callback_(std::move(adapter));
+                    self->connection_callback_(std::move(adapter));
                 }
-                do_accept();
+                if (self->running_.load() && self->acceptor_.is_open()) {
+                    self->do_accept();
+                }
             } else if (ec != asio::error::operation_aborted) {
-                if (logger_) {
-                    logger_->error("[tcp] stage=accept status=failed msg=" + ec.message());
+                if (self->logger_) {
+                    self->logger_->error("[tcp] stage=accept status=failed msg=" + ec.message());
                 }
             }
         });

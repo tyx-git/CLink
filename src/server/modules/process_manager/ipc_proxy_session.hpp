@@ -13,6 +13,7 @@
 
 #include "src/share/core/logging/logger.hpp"
 #include "src/server/core/network/session_manager.hpp"
+#include "src/server/core/network/vip_bind.hpp"
 #include "src/server/modules/process_inject/include/process_ipc_server.hpp" // For IPCConnection
 
 namespace clink::server::modules {
@@ -47,32 +48,24 @@ public:
                     return;
                 }
 
+                auto connect_results = results;
+
                 if (session_manager_) {
-                    std::string vip = session_manager_->get_virtual_interface_address();
-                    if (!vip.empty() && !results.empty()) {
-                        asio::error_code addr_ec;
-                        const auto bind_addr = asio::ip::make_address(vip, addr_ec);
-                        if (!addr_ec) {
-                            asio::error_code open_ec;
-                            asio::error_code bind_ec;
-                            remote_socket_.open(results.begin()->endpoint().protocol(), open_ec);
-                            if (!open_ec) {
-                                remote_socket_.bind(asio::ip::tcp::endpoint(bind_addr, 0), bind_ec);
-                                if (bind_ec) {
-                                    if (logger_) {
-                                        logger_->warn("Failed to bind IPC proxy socket to VIP {}: {}", vip, bind_ec.message());
-                                    }
-                                    asio::error_code close_ec;
-                                    remote_socket_.close(close_ec);
-                                }
+                    const std::string vip = session_manager_->get_virtual_interface_address();
+                    auto bind_addr = clink::core::network::parse_bind_address(vip, logger_, "[ipc.proxy]");
+                    if (bind_addr) {
+                        auto filtered = clink::core::network::filter_results_for_bind_address(results, *bind_addr);
+                        if (filtered.empty()) {
+                            if (logger_) {
+                                logger_->warn("[ipc.proxy] no remote endpoints match VIP address family vip={}", bind_addr->to_string());
                             }
-                        } else if (logger_) {
-                            logger_->warn("Invalid VIP address {}: {}", vip, addr_ec.message());
+                        } else if (clink::core::network::bind_socket_to_virtual_interface(remote_socket_, *bind_addr, logger_, "[ipc.proxy]")) {
+                            connect_results = std::move(filtered);
                         }
                     }
                 }
 
-                asio::async_connect(remote_socket_, results,
+                asio::async_connect(remote_socket_, connect_results,
                     [this, self, host, port](std::error_code connect_ec, asio::ip::tcp::endpoint) {
                         if (connect_ec) {
                             if (logger_) {
