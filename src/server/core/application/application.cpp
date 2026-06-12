@@ -1208,6 +1208,12 @@ void Application::on_session_event(network::SessionEvent event, const std::strin
         case network::SessionEvent::Connected: {
             session_state_ = next_state;
             if (summary.active_count > 0) {
+                {
+                    std::lock_guard<std::mutex> lock(control_state_mutex_);
+                    last_connect_phase_ = control_plane::kStatusConnected;
+                    last_connect_reason_ = control_plane::kValueNone;
+                    last_connect_message_.clear();
+                }
                 logger_->info("[connect.state] transition " + std::to_string(static_cast<int>(prev_state)) + "->" +
                               std::to_string(static_cast<int>(next_state)) +
                               " reason=engine_start_ok session_id=" + event_session_id +
