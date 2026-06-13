@@ -93,6 +93,86 @@ TEST_CASE("SocksSession filters remote endpoints to VIP address family", "[socks
     }
 }
 
+TEST_CASE("SocksServer accepts IPv6 loopback clients with Asio backend", "[socks][ipv6]") {
+    asio::io_context io_context;
+    auto logger = std::make_shared<Logger>("TestLogger");
+    auto server = std::make_shared<SocksServer>(io_context, logger);
+
+    REQUIRE(server->start(0, "asio"));
+    REQUIRE(server->port() > 0);
+
+    std::jthread server_thread([&]() {
+        io_context.run();
+    });
+
+    asio::io_context client_io;
+    asio::ip::tcp::socket client_socket(client_io);
+    asio::error_code connect_ec;
+    client_socket.connect(
+        asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), server->port()),
+        connect_ec);
+    if (connect_ec) {
+        server->stop();
+        io_context.stop();
+    }
+    REQUIRE_FALSE(connect_ec);
+
+    uint8_t handshake[] = {0x05, 0x01, 0x00};
+    asio::write(client_socket, asio::buffer(handshake));
+
+    uint8_t response[2]{};
+    asio::error_code read_ec;
+    const auto len = asio::read(client_socket, asio::buffer(response), read_ec);
+    REQUIRE_FALSE(read_ec);
+    REQUIRE(len == 2);
+    CHECK(response[0] == 0x05);
+    CHECK(response[1] == 0x00);
+
+    server->stop();
+    io_context.stop();
+}
+
+#ifdef _WIN32
+TEST_CASE("SocksServer accepts IPv6 loopback clients with WinSock backend", "[socks][ipv6][winsock]") {
+    asio::io_context io_context;
+    auto logger = std::make_shared<Logger>("TestLogger");
+    SocksServer server(io_context, logger);
+
+    REQUIRE(server.start(0, "winsock"));
+    REQUIRE(server.port() > 0);
+
+    std::jthread server_thread([&]() {
+        io_context.run();
+    });
+
+    asio::io_context client_io;
+    asio::ip::tcp::socket client_socket(client_io);
+    asio::error_code connect_ec;
+    client_socket.connect(
+        asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), server.port()),
+        connect_ec);
+    if (connect_ec) {
+        server.stop();
+        io_context.stop();
+    }
+    REQUIRE_FALSE(connect_ec);
+
+    uint8_t handshake[] = {0x05, 0x01, 0x00};
+    asio::write(client_socket, asio::buffer(handshake));
+
+    uint8_t response[2]{};
+    asio::error_code read_ec;
+    const auto len = asio::read(client_socket, asio::buffer(response), read_ec);
+    REQUIRE_FALSE(read_ec);
+    REQUIRE(len == 2);
+    CHECK(response[0] == 0x05);
+    CHECK(response[1] == 0x00);
+
+    server.stop();
+    io_context.stop();
+}
+#endif
+
 TEST_CASE("SocksServer Handshake and Connect", "[socks]") {
     asio::io_context io_context;
     auto logger = std::make_shared<Logger>("TestLogger");
