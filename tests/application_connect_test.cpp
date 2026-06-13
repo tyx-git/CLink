@@ -214,3 +214,69 @@ TEST_CASE("application disconnect clears pending connect status details", "[appl
         server_thread.join();
     }
 }
+
+TEST_CASE("application reload applies process manager runtime changes without restart drift", "[application][reload]") {
+    namespace control_plane = clink::protocol::control_plane;
+    using json = nlohmann::json;
+
+#ifdef _WIN32
+    const std::string ipc_section = "[ipc]\naddress = \"\\\\\\\\.\\\\pipe\\\\clink-reload-pm-runtime-test\"\n";
+#else
+    const auto ipc_path = std::filesystem::temp_directory_path() / "clink-reload-pm-runtime-test.sock";
+    std::filesystem::remove(ipc_path);
+    const std::string ipc_section = "[ipc]\naddress = \"" + ipc_path.string() + "\"\n";
+#endif
+
+    const auto config_path = write_temp_config(
+        "clink-reload-pm-runtime-test.toml",
+        ipc_section +
+        "[network]\n"
+        "listen_endpoint = \"\"\n"
+        "[network.virtual_interface]\n"
+        "enabled = false\n"
+        "[process_manager]\n"
+        "enabled = true\n"
+        "[socks]\n"
+        "port = 0\n");
+
+    clink::core::ApplicationOptions options;
+    options.identity = "clink-reload-pm-runtime-test";
+    options.role = "service";
+    options.config_path = config_path;
+    options.heartbeat_interval = std::chrono::milliseconds(1);
+
+    clink::core::Application app{options};
+    app.initialize();
+
+    auto status = json::parse(app.get_session_status());
+    REQUIRE_FALSE(status.at(control_plane::kFieldRestartRequired).get<bool>());
+
+    write_temp_config(
+        "clink-reload-pm-runtime-test.toml",
+        ipc_section +
+        "[network]\n"
+        "listen_endpoint = \"\"\n"
+        "[network.virtual_interface]\n"
+        "enabled = false\n"
+        "[process_manager]\n"
+        "enabled = true\n"
+        "[socks]\n"
+        "port = 0\n"
+        "backend = \"asio\"\n");
+
+    app.reload_configuration();
+
+    status = json::parse(app.get_session_status());
+    CHECK_FALSE(status.at(control_plane::kFieldRestartRequired).get<bool>());
+    CHECK(status.at(control_plane::kFieldRestartReasons).empty());
+    CHECK(status.at(control_plane::kFieldProcessManager)
+              .at(control_plane::kFieldSocksAvailable).get<bool>());
+    CHECK(status.at(control_plane::kFieldProcessManager)
+              .at(control_plane::kFieldSocksBackend).get<std::string>() == "asio");
+
+    app.shutdown(std::chrono::milliseconds(100));
+    std::filesystem::remove(config_path);
+#ifndef _WIN32
+    std::filesystem::remove(ipc_path);
+#endif
+}

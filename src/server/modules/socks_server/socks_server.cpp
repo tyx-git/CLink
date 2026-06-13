@@ -581,6 +581,7 @@ bool SocksServer::start_winsock_backend(uint16_t port) {
 
     winsock_listen_socket_ = static_cast<uintptr_t>(listen_sock);
     winsock_work_guard_.emplace(asio::make_work_guard(io_context_));
+    winsock_accepting_ = std::make_shared<std::atomic<bool>>(true);
     winsock_running_.store(true);
     backend_ = Backend::WinSock;
 
@@ -594,7 +595,14 @@ bool SocksServer::start_winsock_backend(uint16_t port) {
 
 void SocksServer::stop_winsock_backend() {
     if (!winsock_running_.exchange(false)) {
+        if (winsock_accepting_) {
+            winsock_accepting_->store(false);
+        }
         return;
+    }
+
+    if (winsock_accepting_) {
+        winsock_accepting_->store(false);
     }
 
     const SOCKET s = static_cast<SOCKET>(winsock_listen_socket_);
@@ -641,18 +649,27 @@ void SocksServer::winsock_accept_loop() {
             }
         }
 
-        asio::post(io_context_, [this, client]() {
+        auto accepting = winsock_accepting_;
+        auto logger = logger_;
+        auto session_manager = session_manager_;
+        auto& io_context = io_context_;
+        asio::post(io_context_, [client, accepting, logger, session_manager, &io_context]() {
+            if (!accepting || !accepting->load()) {
+                closesocket(client);
+                return;
+            }
+
             asio::error_code ec;
-            asio::ip::tcp::socket socket(io_context_);
+            asio::ip::tcp::socket socket(io_context);
             socket.assign(asio::ip::tcp::v6(), client, ec);
             if (ec) {
                 closesocket(client);
-                if (logger_) {
-                    logger_->warn("[socks] stage=fallback.winsock.assign.failed", ec.message());
+                if (logger) {
+                    logger->warn("[socks] stage=fallback.winsock.assign.failed", ec.message());
                 }
                 return;
             }
-            std::make_shared<SocksSession>(io_context_, std::move(socket), logger_, session_manager_)->start();
+            std::make_shared<SocksSession>(io_context, std::move(socket), logger, session_manager)->start();
         });
     }
 }
