@@ -309,6 +309,58 @@ void Application::initialize() {
     }
 }
 
+bool Application::apply_process_manager_runtime_configuration() {
+    const bool enable_process_manager = resolve_process_manager_enabled(configuration_);
+
+    if (process_manager_) {
+        const auto current_signature = build_process_manager_signature(configuration_);
+        std::string effective_process_manager_signature;
+        {
+            std::lock_guard<std::mutex> lock(control_state_mutex_);
+            effective_process_manager_signature = effective_process_manager_signature_;
+        }
+
+        if (current_signature == effective_process_manager_signature) {
+            return true;
+        }
+
+        auto pm = std::static_pointer_cast<clink::server::modules::ProcessManager>(process_manager_);
+        if (pm) {
+            pm->stop();
+        }
+        process_manager_.reset();
+    }
+
+    if (!enable_process_manager || options_.role != "service") {
+        std::lock_guard<std::mutex> lock(control_state_mutex_);
+        effective_process_manager_signature_ = build_process_manager_signature(configuration_);
+        return true;
+    }
+
+    bool applied = false;
+    try {
+        auto pm = std::make_shared<clink::server::modules::ProcessManager>(io_context_, logger_, session_manager_);
+        const bool pm_started = pm->start(configuration_);
+        if (pm_started) {
+            process_manager_ = pm;
+            applied = true;
+        } else {
+            logger_->warn("[apply] stage=process_manager.start.failed_return_false");
+        }
+    } catch (const std::exception& ex) {
+        logger_->error(std::string("[apply] stage=process_manager.start.exception: ") + ex.what());
+    } catch (...) {
+        logger_->error("[apply] stage=process_manager.start.exception: unknown");
+    }
+
+    if (applied) {
+        std::lock_guard<std::mutex> lock(control_state_mutex_);
+        effective_process_manager_signature_ = build_process_manager_signature(configuration_);
+    }
+
+    return applied;
+}
+
 bool Application::apply_configuration() {
     bool apply_ok = true;
     bool vif_enabled = configuration_.get_bool("network.virtual_interface.enabled", true);
@@ -577,6 +629,10 @@ void Application::reload_configuration() {
             logger_->warn("[app] configuration restored to previous snapshot after failed reload");
         }
         return;
+    }
+
+    if (!apply_process_manager_runtime_configuration()) {
+        logger_->error("[app] configuration reload process manager apply failed; status will continue reporting restart requirement");
     }
 
     logger_->info("[app] configuration reloaded successfully");
@@ -1208,6 +1264,12 @@ void Application::on_session_event(network::SessionEvent event, const std::strin
         case network::SessionEvent::Connected: {
             session_state_ = next_state;
             if (summary.active_count > 0) {
+                {
+                    std::lock_guard<std::mutex> lock(control_state_mutex_);
+                    last_connect_phase_ = control_plane::kStatusConnected;
+                    last_connect_reason_ = control_plane::kValueNone;
+                    last_connect_message_.clear();
+                }
                 logger_->info("[connect.state] transition " + std::to_string(static_cast<int>(prev_state)) + "->" +
                               std::to_string(static_cast<int>(next_state)) +
                               " reason=engine_start_ok session_id=" + event_session_id +

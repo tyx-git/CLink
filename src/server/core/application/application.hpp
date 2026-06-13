@@ -80,6 +80,7 @@ private:
     void log_lifecycle(const std::string& stage) const;
     void load_configuration();
     bool apply_configuration();
+    bool apply_process_manager_runtime_configuration();
     void start_modules();
     void stop_modules();
     void setup_config_watcher(); 

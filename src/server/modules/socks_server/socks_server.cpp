@@ -322,7 +322,7 @@ bool SocksServer::start(uint16_t port, const std::string& backend) {
         }
 #endif
 
-        asio::ip::tcp::endpoint endpoint(asio::ip::tcp::v4(), port);
+        asio::ip::tcp::endpoint endpoint(asio::ip::tcp::v6(), port);
 
         std::string backend_mode = backend;
         std::transform(backend_mode.begin(), backend_mode.end(), backend_mode.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -395,6 +395,19 @@ bool SocksServer::start(uint16_t port, const std::string& backend) {
             logger_->info("[socks] stage=acceptor.open.ok");
         }
 
+        if (endpoint.address().is_v6()) {
+            asio::ip::v6_only v6_only(false);
+            acceptor_->set_option(v6_only, ec);
+            if (ec) {
+                if (logger_) {
+                    logger_->warn("[socks] stage=acceptor.dual_stack.failed error={}", ec.message());
+                }
+                ec.clear();
+            } else if (logger_) {
+                logger_->info("[socks] stage=acceptor.dual_stack.ok");
+            }
+        }
+
         if (logger_) {
             logger_->info("[socks] stage=acceptor.set_reuse.begin");
         }
@@ -409,7 +422,7 @@ bool SocksServer::start(uint16_t port, const std::string& backend) {
         }
 
         if (logger_) {
-            logger_->info("[socks] stage=acceptor.bind.begin endpoint=0.0.0.0:{}", port);
+            logger_->info("[socks] stage=acceptor.bind.begin endpoint=[::]:{} dual_stack=true", port);
         }
         acceptor_->bind(endpoint, ec);
         if (ec) {
@@ -520,7 +533,7 @@ bool SocksServer::start_winsock_backend(uint16_t port) {
         return false;
     }
 
-    SOCKET listen_sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    SOCKET listen_sock = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     if (listen_sock == INVALID_SOCKET) {
         if (logger_) {
             logger_->error("[socks] stage=fallback.winsock.socket.failed", WSAGetLastError());
@@ -532,10 +545,13 @@ bool SocksServer::start_winsock_backend(uint16_t port) {
     BOOL opt = TRUE;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(port);
+    DWORD v6_only = 0;
+    setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6_only), sizeof(v6_only));
+
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(port);
 
     if (::bind(listen_sock, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
         if (logger_) {
@@ -555,16 +571,17 @@ bool SocksServer::start_winsock_backend(uint16_t port) {
         return false;
     }
 
-    sockaddr_in local{};
+    sockaddr_in6 local{};
     int local_len = sizeof(local);
     if (getsockname(listen_sock, reinterpret_cast<sockaddr*>(&local), &local_len) == 0) {
-        port_ = ntohs(local.sin_port);
+        port_ = ntohs(local.sin6_port);
     } else {
         port_ = port;
     }
 
     winsock_listen_socket_ = static_cast<uintptr_t>(listen_sock);
     winsock_work_guard_.emplace(asio::make_work_guard(io_context_));
+    winsock_accepting_ = std::make_shared<std::atomic<bool>>(true);
     winsock_running_.store(true);
     backend_ = Backend::WinSock;
 
@@ -578,7 +595,14 @@ bool SocksServer::start_winsock_backend(uint16_t port) {
 
 void SocksServer::stop_winsock_backend() {
     if (!winsock_running_.exchange(false)) {
+        if (winsock_accepting_) {
+            winsock_accepting_->store(false);
+        }
         return;
+    }
+
+    if (winsock_accepting_) {
+        winsock_accepting_->store(false);
     }
 
     const SOCKET s = static_cast<SOCKET>(winsock_listen_socket_);
@@ -625,18 +649,27 @@ void SocksServer::winsock_accept_loop() {
             }
         }
 
-        asio::post(io_context_, [this, client]() {
+        auto accepting = winsock_accepting_;
+        auto logger = logger_;
+        auto session_manager = session_manager_;
+        auto& io_context = io_context_;
+        asio::post(io_context_, [client, accepting, logger, session_manager, &io_context]() {
+            if (!accepting || !accepting->load()) {
+                closesocket(client);
+                return;
+            }
+
             asio::error_code ec;
-            asio::ip::tcp::socket socket(io_context_);
-            socket.assign(asio::ip::tcp::v4(), client, ec);
+            asio::ip::tcp::socket socket(io_context);
+            socket.assign(asio::ip::tcp::v6(), client, ec);
             if (ec) {
                 closesocket(client);
-                if (logger_) {
-                    logger_->warn("[socks] stage=fallback.winsock.assign.failed", ec.message());
+                if (logger) {
+                    logger->warn("[socks] stage=fallback.winsock.assign.failed", ec.message());
                 }
                 return;
             }
-            std::make_shared<SocksSession>(io_context_, std::move(socket), logger_, session_manager_)->start();
+            std::make_shared<SocksSession>(io_context, std::move(socket), logger, session_manager)->start();
         });
     }
 }

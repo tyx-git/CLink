@@ -75,6 +75,7 @@ private:
 
 #ifdef _WIN32
     std::atomic<bool> winsock_running_{false};
+    std::shared_ptr<std::atomic<bool>> winsock_accepting_{std::make_shared<std::atomic<bool>>(false)};
     std::thread winsock_accept_thread_;
     uintptr_t winsock_listen_socket_ = 0;
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> winsock_work_guard_;
