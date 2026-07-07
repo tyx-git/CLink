@@ -6,34 +6,18 @@
 
 namespace clink::core::network {
 
-/**
- * @brief 令牌桶限流器，用于控制带宽
- */
+// 令牌桶限流器：控制带宽上限
+// 被 ReliabilityEngine 调用，限制每个会话的发送速率
 class RateLimiter {
 public:
-    /**
-     * @param bytes_per_second 每秒允许通过的字节数 (0 表示不限流)
-     * @param burst_size 允许的最大突发字节数
-     */
     RateLimiter(size_t bytes_per_second, size_t burst_size);
-
-    /**
-     * @brief 尝试获取发送指定大小数据的许可
-     * @return 如果允许发送则返回 true，否则返回 false
-     */
-    bool consume(size_t bytes);
-
-    /**
-     * @brief 动态更新限流参数
-     */
-    void update_limits(size_t bytes_per_second, size_t burst_size);
-
+    bool consume(size_t bytes);           // 消费令牌：成功返回 true，失败（限流）返回 false
+    void update_limits(size_t bytes_per_second, size_t burst_size); // 动态更新限流参数
 private:
-    void refill();
-
-    size_t bytes_per_second_;
-    size_t burst_size_;
-    double tokens_;
+    void refill();                        // 按时间间隔补充令牌
+    size_t bytes_per_second_;             // 每秒令牌数（字节）
+    size_t burst_size_;                   // 最大突发
+    double tokens_;                       // 当前令牌数
     std::chrono::steady_clock::time_point last_refill_time_;
     std::mutex mutex_;
 };

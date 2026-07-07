@@ -1,3 +1,7 @@
+// ===== CLI 入口 (clink.exe) =====
+// 职责：解析命令行参数 → 通过 IPC 向本地 clinkd 发送命令 → 渲染 JSON 结果 → 返回退出码
+// 不承担任何数据面工作，只做控制面命令的中转
+
 #include "src/client/core/application/application.hpp"
 #include "src/client/core/utils/terminal.hpp"
 #include "src/share/core/config/log_path_utils.hpp"
@@ -27,10 +31,10 @@ constexpr const char* kDefaultIpcPipe = "\\\\.\\pipe\\clink-ipc";
 constexpr const char* kDefaultIpcPipe = "/tmp/clink-ipc.sock";
 #endif
 
-// File-scope IPC pipe resolved once in main() before any handler runs
+// 全局 IPC 管道地址（main 中解析一次，所有 handler 共用）
 static std::string g_resolved_ipc_pipe;
 
-// Resolve IPC address from command line (--ipc), env, or config
+// 从命令行 --ipc、环境变量或配置文件中解析 IPC 地址
 void resolve_ipc_pipe(int argc, char** argv,
                       const clink::core::config::Configuration& config) {
     for (int i = 1; i < argc; ++i) {
@@ -43,7 +47,7 @@ void resolve_ipc_pipe(int argc, char** argv,
     g_resolved_ipc_pipe = cfg_addr.empty() ? kDefaultIpcPipe : cfg_addr;
 }
 
-// Overload for handlers that don't have argc/argv — reads from config
+// 获取已解析的 IPC 地址（无 argc/argv 的 handler 使用）
 std::string get_ipc_pipe(const clink::core::config::Configuration& config) {
     if (!g_resolved_ipc_pipe.empty()) return g_resolved_ipc_pipe;
     return config.get_string("ipc.address", kDefaultIpcPipe);

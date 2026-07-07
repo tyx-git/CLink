@@ -1,3 +1,7 @@
+// ===== 客户端 Application 实现 =====
+// 比服务端精简：没有 SessionManager，不管理会话表
+// 主要方法 connect_session() 创建独立线程发起 TLS/TCP 出站连接
+
 #include "src/client/core/application/application.hpp"
 #include "src/share/core/config/config_signature.hpp"
 #include "src/share/core/logging/config.hpp"

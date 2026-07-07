@@ -14,15 +14,13 @@
 
 namespace clink::core::network {
 
-/**
- * @brief 会话状态定义
- */
+// 会话状态机：Idle → Handshaking → Active → Closing / Error
 enum class SessionStatus {
-    Idle,
-    Handshaking,
-    Active,
-    Closing,
-    Error
+    Idle,        // 空闲：新创建或已回收
+    Handshaking, // 握手：正在进行初始协商
+    Active,      // 活跃：数据可双向传输
+    Closing,     // 关闭：正在清理资源
+    Error        // 错误：异常终止
 };
 
 enum class SessionEvent {
@@ -30,113 +28,54 @@ enum class SessionEvent {
     Disconnected
 };
 
-/**
- * @brief 会话上下文，存储单个连接的所有状态
- */
+// 单个会话的完整上下文：基础信息 + 流量统计 + QoS 指标
 struct SessionContext {
-    std::string session_id;
-    std::string user_id;
-    std::string device_id;
-    std::string remote_endpoint;
-    SessionStatus status{SessionStatus::Idle};
-    std::chrono::system_clock::time_point last_activity;
-    uint64_t bytes_sent{0};
-    uint64_t bytes_received{0};
-    std::chrono::milliseconds rtt{0};
-    std::chrono::milliseconds rto{200};
-    float packet_loss_rate{0.0f};
+    std::string session_id;             // 全局唯一会话标识符
+    std::string user_id;                 // 用户身份（来自 PSK 鉴权）
+    std::string device_id;              // 设备标识
+    std::string remote_endpoint;         // 远端端点 (IP:Port)
+    SessionStatus status{SessionStatus::Idle}; // 当前状态
+    std::chrono::system_clock::time_point last_activity; // 最后活动时间（用于空闲回收）
+    uint64_t bytes_sent{0};              // 累计发送字节数
+    uint64_t bytes_received{0};          // 累计接收字节数
+    std::chrono::milliseconds rtt{0};    // 当前往返时间估计
+    std::chrono::milliseconds rto{200};  // 重传超时（指数退避）
+    float packet_loss_rate{0.0f};        // 丢包率
     policy::Policy policy;
     
-    // Quality Metrics
+    // QoS 指标：重传次数、损坏包数、延迟分布（7个桶，<10ms 到 >1s）
     uint64_t retransmission_count{0};
     uint64_t corrupted_packets{0};
-    uint32_t latency_bucket_10ms{0};
-    uint32_t latency_bucket_50ms{0};
-    uint32_t latency_bucket_100ms{0};
-    uint32_t latency_bucket_200ms{0};
-    uint32_t latency_bucket_500ms{0};
-    uint32_t latency_bucket_1s{0};
-    uint32_t latency_bucket_inf{0};
+    uint32_t latency_bucket_10ms{0};    // < 10ms
+    uint32_t latency_bucket_50ms{0};    // 10-50ms
+    uint32_t latency_bucket_100ms{0};   // 50-100ms
+    uint32_t latency_bucket_200ms{0};   // 100-200ms
+    uint32_t latency_bucket_500ms{0};   // 200-500ms
+    uint32_t latency_bucket_1s{0};      // 500ms-1s
+    uint32_t latency_bucket_inf{0};     // > 1s
 };
 
-/**
- * @brief 会话管理器接口，负责管理所有活动的网络会话和虚拟接口
- */
+// 会话管理器接口：管理所有活跃网络会话和虚拟网卡的生命周期
 class SessionManager : public std::enable_shared_from_this<SessionManager> {
 public:
     using SessionEventCallback = std::function<void(SessionEvent, const std::string&)>;
 
     virtual ~SessionManager() = default;
 
-    /**
-     * @brief 初始化管理器 (如创建虚拟网卡)
-     */
-    virtual std::error_code initialize() = 0;
-
-    /**
-     * @brief 处理新连接请求
-     */
-    virtual void handle_new_connection(TransportAdapterPtr adapter) = 0;
-
-    /**
-     * @brief 添加传输监听器
-     */
-    virtual void add_listener(TransportListenerPtr listener) = 0;
-
-    /**
-     * @brief 开始在指定端点监听新连接
-     */
-    virtual std::error_code start_listen(TransportListenerPtr listener, const std::string& endpoint) = 0;
-
-    /**
-     * @brief 手动创建一个会话 (通常用于客户端主动发起连接)
-     */
-    virtual void create_session(TransportAdapterPtr adapter) = 0;
-
-    /**
-     * @brief 终止特定会话
-     */
-    virtual void terminate_session(const std::string& session_id) = 0;
-
-    /**
-     * @brief 获取所有活跃会话的快照
-     */
-    virtual std::vector<SessionContext> get_active_sessions() const = 0;
-
-    /**
-     * @brief 获取虚拟接口的 IP 地址
-     */
-    virtual std::string get_virtual_interface_address() const = 0;
-
-    /**
-     * @brief 路由数据包到对应的会话或虚拟接口
-     */
-    virtual std::error_code route_packet(const uint8_t* data, size_t size) = 0;
-
-    /**
-     * @brief 广播数据包到所有活跃会话 (用于控制消息或特定广播流)
-     */
-    virtual void broadcast(const uint8_t* data, size_t size) = 0;
-
-    /**
-     * @brief 关闭管理器，释放所有资源
-     */
-    virtual void shutdown() = 0;
-
-    /**
-     * @brief 设置全局默认带宽限制
-     */
-    virtual void set_default_rate_limit(size_t bytes_per_second, size_t burst_size) = 0;
-
-    /**
-     * @brief 设置会话状态事件回调
-     */
-    virtual void set_session_event_callback(SessionEventCallback cb) = 0;
-
-    /**
-     * @brief 设置空闲会话超时，0 表示禁用
-     */
-    virtual void set_session_idle_timeout(std::chrono::seconds timeout) = 0;
+    virtual std::error_code initialize() = 0;                        // 初始化（创建虚拟网卡等）
+    virtual void handle_new_connection(TransportAdapterPtr adapter) = 0;  // 新连接从 listener 到达
+    virtual void add_listener(TransportListenerPtr listener) = 0;     // 注册传输监听器
+    virtual std::error_code start_listen(TransportListenerPtr listener, const std::string& endpoint) = 0; // 开始在端点监听
+    virtual void create_session(TransportAdapterPtr adapter) = 0;     // 手动创建会话（客户端主动发起）
+    virtual void terminate_session(const std::string& session_id) = 0; // 终止指定会话
+    virtual std::vector<SessionContext> get_active_sessions() const = 0; // 获取会话快照
+    virtual std::string get_virtual_interface_address() const = 0;    // 获取虚拟网卡 IP
+    virtual std::error_code route_packet(const uint8_t* data, size_t size) = 0; // 数据包路由到对应会话
+    virtual void broadcast(const uint8_t* data, size_t size) = 0;     // 广播数据到所有会话
+    virtual void shutdown() = 0;                                       // 关闭管理器释放资源
+    virtual void set_default_rate_limit(size_t bytes_per_second, size_t burst_size) = 0; // 带宽限制
+    virtual void set_session_event_callback(SessionEventCallback cb) = 0; // 会话事件回调
+    virtual void set_session_idle_timeout(std::chrono::seconds timeout) = 0; // 空闲超时回收
 };
 
 using SessionManagerPtr = std::shared_ptr<SessionManager>;

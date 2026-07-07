@@ -11,9 +11,7 @@
 
 namespace clink::core::network {
 
-/**
- * @brief 基础 TCP 传输适配器实现 (Asynchronous)
- */
+// TCP 传输适配器：基于 Asio 异步读写，支撑数据面 TCP 隧道
 class TcpTransportAdapter : public TransportAdapter, public std::enable_shared_from_this<TcpTransportAdapter> {
 public:
     explicit TcpTransportAdapter(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger);
@@ -27,8 +25,8 @@ public:
 
     std::string_view type() const noexcept override { return "tcp"; }
 
-    void start(); // Start receiving (for accepted connections)
-    std::error_code start(const std::string& endpoint) override;
+    void start();                                           // 开始接收（用于 listener accept 的连接）
+    std::error_code start(const std::string& endpoint) override;    // 作为客户端连接到远端 endpoint
     void stop() override;
     std::error_code send(const uint8_t* data, size_t size) override;
     std::error_code send(const Packet& packet) override;
@@ -56,9 +54,7 @@ private:
     std::vector<uint8_t> receive_buffer_;
 };
 
-/**
- * @brief 基础 TCP 监听器实现 (Asynchronous)
- */
+// TCP 监听器：accept 新连接并创建 TcpTransportAdapter
 class TcpTransportListener : public TransportListener, public std::enable_shared_from_this<TcpTransportListener> {
 public:
     explicit TcpTransportListener(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger);

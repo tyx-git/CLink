@@ -3,6 +3,7 @@
 
 #include <stdexcept>
 
+// 客户端 ModuleRegistry 实现（与服务端逻辑一致）
 namespace clink::core {
 
 void ModuleRegistry::register_module(ModulePtr module) {

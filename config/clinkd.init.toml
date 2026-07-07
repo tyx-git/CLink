@@ -3,7 +3,7 @@ role = "service"                    # "service" = relay server, "client" = clien
 data_dir = "${CLINK_DATA_DIR}"      # 数据目录，可通过环境变量 CLINK_DATA_DIR 覆盖
 
 [network]
-listen_endpoint = "tls://0.0.0.0:4433"  # 监听地址（TCP 或 TLS 前缀）
+listen_endpoint = "tls://0.0.0.0:443"  # 监听地址（TCP 或 TLS 前缀）
 allow_self_connect_for_debug = true    # 允许调试模式下自连接（仅开发用）
 allow_self_connect = true              # 允许自连接（同 IP 同端口连接自己）
 bandwidth_limit = 10240                 # 全局带宽限制（bytes/s），0 = 不限

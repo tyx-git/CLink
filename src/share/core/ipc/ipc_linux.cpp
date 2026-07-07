@@ -1,3 +1,8 @@
+// ===== Linux IPC 实现：Unix Domain Socket =====
+// IpcServer：bind + listen + accept 循环 + 每连接独立线程处理
+// IpcClient：connect 连接 + read/write 同步阻塞
+// Socket 路径默认 /tmp/clink-ipc.sock，可通过配置 ipc.address 覆盖
+
 #include "src/share/core/ipc/ipc.hpp"
 #include "src/share/core/ipc/ipc_message_utils.hpp"
 #include "src/share/core/logging/logger.hpp"

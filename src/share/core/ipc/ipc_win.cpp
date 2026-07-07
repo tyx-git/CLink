@@ -1,3 +1,8 @@
+// ===== Windows IPC 实现：Named Pipe =====
+// IpcServer：CreateNamedPipe + 独立 accept 线程 + 每连接独立处理线程
+// IpcClient：CreateFile 连接 + WriteFile/ReadFile 同步阻塞
+// 管道路径默认 \\.\pipe\clink-ipc，可通过配置 ipc.address 覆盖
+
 #include "src/share/core/ipc/ipc.hpp"
 #include "src/share/core/ipc/ipc_message_utils.hpp"
 #include "src/share/core/logging/logger.hpp"
@@ -17,6 +22,7 @@ namespace control_plane = clink::protocol::control_plane;
 constexpr char kShutdownCommand[] = "__clink_shutdown__";
 constexpr DWORD kMaxIpcMessageSize = 1024 * 1024;
 
+// 完整写入指定字节数（WriteFile 可能一次写不完，循环直到写完）
 bool write_exact(HANDLE handle, const void* data, DWORD size) {
     const char* cursor = static_cast<const char*>(data);
     DWORD remaining = size;

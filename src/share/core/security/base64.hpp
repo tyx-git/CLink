@@ -3,9 +3,10 @@
 #include <string>
 #include <vector>
 
+// Base64 编解码：用于 DPAPI 加密后二进制数据的文本传输
 namespace clink::core::security {
 
-inline std::string to_base64(const std::string& data) {
+inline std::string to_base64(const std::string& data) {  // 二进制 → Base64 字符串
     static const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string base64;
     int i = 0;
@@ -39,7 +40,7 @@ inline std::string to_base64(const std::string& data) {
     return base64;
 }
 
-inline std::string from_base64(const std::string& base64) {
+inline std::string from_base64(const std::string& base64) {  // Base64 字符串 → 二进制
     static const std::string base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string decoded;
     std::vector<int> T(256, -1);

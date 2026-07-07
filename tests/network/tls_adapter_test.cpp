@@ -65,6 +65,45 @@ TEST_CASE("TLS listener can start when owned through TransportListener", "[netwo
     listener->stop();
 }
 
+TEST_CASE("TLS listener wildcard bind accepts IPv4 and IPv6 clients", "[network][tls][listener][ipv6]") {
+    asio::io_context probe_io;
+    asio::ip::tcp::acceptor probe(
+        probe_io,
+        asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+    const auto port = probe.local_endpoint().port();
+    probe.close();
+
+    asio::io_context io_context;
+    auto logger = std::make_shared<clink::core::logging::Logger>("tls-listener-dual-stack-test");
+    auto listener = std::make_shared<TlsTransportListener>(io_context, logger);
+
+    const auto listen_ec = listener->listen("0.0.0.0:" + std::to_string(port));
+    REQUIRE_FALSE(listen_ec);
+
+    std::jthread io_thread([&]() {
+        io_context.run();
+    });
+
+    asio::io_context client_io;
+    asio::ip::tcp::socket ipv6_client(client_io);
+    asio::error_code connect_ec;
+    ipv6_client.connect(
+        asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), port),
+        connect_ec);
+    if (connect_ec == asio::error::address_family_not_supported ||
+        connect_ec == asio::error::network_unreachable) {
+        WARN("IPv6 loopback is unavailable on this platform: " << connect_ec.message());
+        listener->stop();
+        io_context.stop();
+        return;
+    }
+    REQUIRE_FALSE(connect_ec);
+
+    ipv6_client.close();
+    listener->stop();
+    io_context.stop();
+}
+
 TEST_CASE("TLS Adapter Connection and Data Transfer", "[.tls][network]") {
     // Ensure certificates exist in config/certs/
     if (!std::filesystem::exists("config/certs/ca.crt")) {

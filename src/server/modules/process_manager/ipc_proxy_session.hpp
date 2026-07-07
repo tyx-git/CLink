@@ -16,6 +16,10 @@
 #include "src/server/core/network/vip_bind.hpp"
 #include "src/server/modules/process_inject/include/process_ipc_server.hpp" // For IPCConnection
 
+// IpcProxySession：将 Hook DLL 的 Pipe 连接映射到一个真实的 TCP 出站连接
+// 当 Hook DLL 发来 Connect 包 → 创建此 session → async_resolve + async_connect
+// 之后 DLL 的 DataSend 通过 send_data() 写入 TCP socket
+// socket 的回包通过 do_read() 读取后 write_packet(DataRecv) 写回 Pipe
 namespace clink::server::modules {
 
 class IpcProxySession : public std::enable_shared_from_this<IpcProxySession> {

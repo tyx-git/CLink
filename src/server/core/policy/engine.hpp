@@ -7,15 +7,18 @@
 #include <set>
 #include "src/share/core/config/configuration.hpp"
 
+// 策略引擎：三层策略优先级（全局 → 用户组 → 设备），merge 模式叠加生效
+// 用于会话接入时的准入控制、带宽限制、超时管理
 namespace clink::core::policy {
 
 struct Policy {
-    std::optional<uint64_t> max_bandwidth_up;   // bps
-    std::optional<uint64_t> max_bandwidth_down; // bps
-    std::optional<uint32_t> session_timeout;    // seconds
-    std::optional<std::vector<std::string>> allowed_subnets;
-    std::optional<bool> allow_split_tunneling;
+    std::optional<uint64_t> max_bandwidth_up;    // 上行带宽上限 (bps)
+    std::optional<uint64_t> max_bandwidth_down;  // 下行带宽上限 (bps)
+    std::optional<uint32_t> session_timeout;     // 会话超时 (秒)
+    std::optional<std::vector<std::string>> allowed_subnets;  // 允许的子网列表
+    std::optional<bool> allow_split_tunneling;   // 是否允许分流
 
+    // merge：下层策略覆盖上层策略的对应字段（没有字段级删除语义）
     void merge(const Policy& other) {
         if (other.max_bandwidth_up) max_bandwidth_up = other.max_bandwidth_up;
         if (other.max_bandwidth_down) max_bandwidth_down = other.max_bandwidth_down;
@@ -82,6 +85,7 @@ public:
         device_policies_[device_id] = policy;
     }
 
+    // evaluate：从全局 → 用户组 → 设备逐层合并，返回最终生效的策略
     Policy evaluate(const std::string& device_id, const std::string& group_id = "") {
         Policy effective = global_policy_;
 

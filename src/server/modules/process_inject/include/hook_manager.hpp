@@ -11,16 +11,18 @@
 #include <map>
 #include <thread>
 
+// HookManager：管理 MinHook API Hook 的生命周期
+// 负责安装/卸载对 Winsock API 的函数级拦截
 namespace clink::hook {
 
 class HookManager {
 public:
     static HookManager& instance();
 
-    bool initialize();
-    void shutdown();
+    bool initialize();   // 初始化 MinHook 并 hook 目标 API
+    void shutdown();     // 卸载所有 hook
 
-    // Hook functions
+    // 被 Hook 替代的 Winsock API（Detour 函数）
     static int WSAAPI hooked_send(SOCKET s, const char* buf, int len, int flags);
     static int WSAAPI hooked_recv(SOCKET s, char* buf, int len, int flags);
     static int WSAAPI hooked_WSASend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount, LPDWORD lpNumberOfBytesSent, DWORD dwFlags, LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);

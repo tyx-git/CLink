@@ -109,6 +109,54 @@ TEST_CASE("TcpTransportAdapter Framing", "[network][tcp]") {
             // Cleanup handled by RAII
         }
 
+TEST_CASE("TcpTransportListener wildcard bind accepts IPv4 and IPv6 clients", "[network][tcp][listener][ipv6]") {
+    asio::io_context probe_io;
+    asio::ip::tcp::acceptor probe(
+        probe_io,
+        asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+    const auto port = probe.local_endpoint().port();
+    probe.close();
+
+    asio::io_context io;
+    auto logger = std::make_shared<clink::core::logging::Logger>("tcp-listener-dual-stack-test");
+    auto listener = std::make_shared<clink::core::network::TcpTransportListener>(io, logger);
+
+    std::promise<void> accepted_promise;
+    auto accepted_future = accepted_promise.get_future();
+    listener->on_connection([&](clink::core::network::TransportAdapterPtr adapter) {
+        if (adapter) {
+            accepted_promise.set_value();
+        }
+    });
+
+    const auto listen_ec = listener->listen("0.0.0.0:" + std::to_string(port));
+    REQUIRE_FALSE(listen_ec);
+
+    std::jthread io_thread([&]() {
+        io.run();
+    });
+
+    asio::io_context client_io;
+    asio::ip::tcp::socket ipv6_client(client_io);
+    asio::error_code connect_ec;
+    ipv6_client.connect(
+        asio::ip::tcp::endpoint(asio::ip::address_v6::loopback(), port),
+        connect_ec);
+    if (connect_ec == asio::error::address_family_not_supported ||
+        connect_ec == asio::error::network_unreachable) {
+        WARN("IPv6 loopback is unavailable on this platform: " << connect_ec.message());
+        listener->stop();
+        io.stop();
+        return;
+    }
+    REQUIRE_FALSE(connect_ec);
+    CHECK(accepted_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+
+    ipv6_client.close();
+    listener->stop();
+    io.stop();
+}
+
 TEST_CASE("TcpTransportListener can be stopped with a pending accept", "[network][tcp][listener]") {
     asio::io_context io;
     auto logger = std::make_shared<clink::core::logging::Logger>("tcp-listener-lifecycle-test");

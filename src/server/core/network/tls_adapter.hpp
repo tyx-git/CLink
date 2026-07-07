@@ -14,9 +14,7 @@
 
 namespace clink::core::network {
 
-/**
- * @brief 基于 Asio SSL 的 TLS 传输适配器实现 (Asynchronous)
- */
+// TLS 传输适配器：基于 Asio SSL 加密隧道，支持证书 pin 校验
 class TlsTransportAdapter : public TransportAdapter, public std::enable_shared_from_this<TlsTransportAdapter> {
 public:
     explicit TlsTransportAdapter(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger);
@@ -41,14 +39,9 @@ public:
     bool is_connected() const noexcept override;
     std::string_view remote_endpoint() const noexcept override { return remote_endpoint_; }
 
-    // Start receiving for accepted connection
-    void start_accepted();
-
-    // 配置证书路径
-    void set_certificates(const std::string& ca_cert, const std::string& client_cert, const std::string& client_key);
-
-    // 设置绑定的证书指纹 (SHA256)
-    void set_pinned_certificate_hash(const std::string& hash) { pinned_cert_hash_ = hash; }
+    void start_accepted();                                     // 开始接收（用于 listener accept 的连接）
+    void set_certificates(const std::string& ca_cert, const std::string& client_cert, const std::string& client_key); // 配置 CA/证书/密钥路径
+    void set_pinned_certificate_hash(const std::string& hash) { pinned_cert_hash_ = hash; } // 设置绑定的证书 SHA256 指纹
 
 private:
     void do_handshake();

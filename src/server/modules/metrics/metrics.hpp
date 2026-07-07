@@ -10,6 +10,8 @@
 #include <mutex>
 #include <condition_variable>
 
+// MetricsModule：周期性采集会话统计快照并输出日志
+// 采集数据：活跃会话数、流量、RTT、丢包率等
 namespace clink::modules {
 
 class MetricsModule : public core::Module {
@@ -23,7 +25,7 @@ public:
     void stop() override;
 
 private:
-    void collect_loop();
+    void collect_loop();  // 采集循环（独立线程）
 
     std::shared_ptr<core::logging::Logger> logger_;
     std::shared_ptr<core::network::SessionManager> session_manager_;

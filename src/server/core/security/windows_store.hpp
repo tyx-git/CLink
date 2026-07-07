@@ -8,6 +8,8 @@
 #include <dpapi.h>
 #endif
 
+// Windows 凭据存储：用 DPAPI 加密后存储在内存 map 中
+// 提供 store/get/remove 凭据接口
 namespace clink::core::security {
 
 class WindowsCredentialStore : public CredentialStore {

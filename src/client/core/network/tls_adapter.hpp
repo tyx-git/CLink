@@ -14,9 +14,7 @@
 
 namespace clink::core::network {
 
-/**
- * @brief 基于 Asio SSL 的 TLS 传输适配器实现 (Asynchronous)
- */
+// 客户端 TLS 传输适配器（与服务端共享接口，独立编译）
 class TlsTransportAdapter : public TransportAdapter, public std::enable_shared_from_this<TlsTransportAdapter> {
 public:
     explicit TlsTransportAdapter(asio::io_context& io_context, std::shared_ptr<logging::Logger> logger);

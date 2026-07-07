@@ -12,6 +12,7 @@ class Configuration;
 }
 }
 
+// 日志配置：级别 / 格式 / 输出路径
 namespace clink::core::logging {
 
 enum class Level {

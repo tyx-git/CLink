@@ -8,26 +8,14 @@
 
 namespace clink::core::network {
 
-/**
- * @brief 访问控制列表 (ACL) 管理器，负责验证客户端身份和权限
- */
+// ACL 访问控制列表：基于客户端 ID 的白名单管理
 class AccessControlList {
 public:
     explicit AccessControlList(std::shared_ptr<logging::Logger> logger);
 
-    /**
-     * @brief 验证客户端 ID 是否在白名单中
-     */
-    bool is_allowed(const std::string& client_id) const;
-
-    /**
-     * @brief 添加允许的客户端 ID
-     */
-    void allow_client(const std::string& client_id);
-
-    /**
-     * @brief 移除客户端 ID
-     */
+    bool is_allowed(const std::string& client_id) const; // 检查客户端是否在白名单中
+    void allow_client(const std::string& client_id);      // 添加白名单条目
+    void remove_client(const std::string& client_id);
     void deny_client(const std::string& client_id);
 
     /**

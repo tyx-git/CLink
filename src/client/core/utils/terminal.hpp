@@ -31,6 +31,8 @@ enum class Color {
     BrightWhite
 };
 
+// 终端彩色输出工具：封装 ANSI 转义码，Windows 上启用虚拟终端处理
+// 被 cli 的 print_status_table 和 monitor 循环使用
 class Terminal {
 public:
     static void initialize() {

@@ -11,9 +11,11 @@
 
 namespace clink::core::security {
 
+// DPAPI 加密辅助：Windows 上用 CryptProtectData/CryptUnprotectData 加密凭据
+// Linux 上为 no-op 占位（当前返回明文，待接入系统密钥链或 libsodium）
 class DpapiHelper {
 public:
-    static std::string encrypt(const std::string& plain_text) {
+    static std::string encrypt(const std::string& plain_text) {  // 加密
 #ifdef _WIN32
         DATA_BLOB input;
         DATA_BLOB output;

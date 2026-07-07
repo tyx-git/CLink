@@ -21,25 +21,27 @@ namespace clink::server::modules {
 
 class SocksServer;
 
+// 进程管理器：管理 SOCKS5 代理 + 进程注入链路的生命周期
+// 负责：SOCKS 启动/停止、DLL 注入触发、注入连接会话管理、健康状态上报
 class ProcessManager {
 public:
     enum class StartState {
-        Failed,
-        Ready,
-        Degraded
+        Failed,   // 启动失败
+        Ready,    // 完全就绪（SOCKS + 注入均可用）
+        Degraded  // 降级运行（SOCKS 或注入不可用）
     };
 
     ProcessManager(asio::io_context& io_context, std::shared_ptr<clink::core::logging::Logger> logger, std::shared_ptr<clink::core::network::SessionManager> session_manager = nullptr);
     ~ProcessManager();
 
-    bool start(const clink::core::config::Configuration& config);
-    void stop();
+    bool start(const clink::core::config::Configuration& config); // 启动：SocksServer + ProcessIPCServer + InjectLibrary
+    void stop();                                                   // 停止所有子服务
 
     [[nodiscard]] StartState start_state() const noexcept { return start_state_; }
     [[nodiscard]] bool is_degraded() const noexcept { return start_state_ == StartState::Degraded; }
-    [[nodiscard]] bool socks_available() const noexcept { return socks_available_; }
-    [[nodiscard]] const std::string& start_reason() const noexcept { return start_reason_; }
-    [[nodiscard]] const std::string& socks_backend() const noexcept { return socks_backend_; }
+    [[nodiscard]] bool socks_available() const noexcept { return socks_available_; }    // SOCKS 是否可用
+    [[nodiscard]] const std::string& start_reason() const noexcept { return start_reason_; }  // 启动结果说明
+    [[nodiscard]] const std::string& socks_backend() const noexcept { return socks_backend_; } // 当前 SOCKS 后端：asio/winsock
 
 private:
     asio::io_context& io_context_;

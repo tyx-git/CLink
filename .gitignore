@@ -23,6 +23,7 @@ test/
 config/certs/
 scripts/
 docs/
+dataflow/
 
 
 # Misc
@@ -34,3 +35,7 @@ CLAUDE.md
 findings.md
 progress.md
 task_plan.md
+.dataflow/
+.homework/
+.rules
+AGENTS.md

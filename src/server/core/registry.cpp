@@ -3,6 +3,8 @@
 
 #include <stdexcept>
 
+// ModuleRegistry 实现：configure_all → start_all → stop_all 三段式批量操作
+// 逆序 stop（后注册的模块先停），单个模块异常不中断整体流程
 namespace clink::core {
 
 void ModuleRegistry::register_module(ModulePtr module) {

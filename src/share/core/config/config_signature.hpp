@@ -8,10 +8,11 @@
 #include <string_view>
 #include <vector>
 
+// 配置签名工具：从指定前缀的配置键生成签名，用于检测配置是否变化
+// 热重载时比对签名：签名不变则跳过重建，签名变则重新加载
+// 某些域的变更（如 ipc.address）标记 restart_required 而非热加载
 namespace clink::core::config {
 
-/// Build a canonical signature string from all configuration keys that match
-/// any of the given prefixes.  Keys are sorted for deterministic output.
 inline std::string build_prefixed_signature(const Configuration& configuration,
                                             std::initializer_list<std::string_view> prefixes) {
     auto keys = configuration.get_keys();

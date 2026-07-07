@@ -18,6 +18,9 @@
 #include <windows.h>
 #endif
 
+// ===== 全局状态 =====
+// g_app_ptr：指向 Application 实例的原子指针，供信号处理器安全访问
+// g_last_signal：记录收到的最后一个信号编号
 namespace {
 
 std::atomic<clink::core::Application*> g_app_ptr{nullptr};
@@ -242,12 +245,14 @@ bool relaunch_as_admin_if_needed(int argc, char** argv) {
 }
 #endif
 
+// 信号处理器：SIGINT/SIGTERM → 仅调用 request_stop() 让主循环退出
+// 不直接在信号处理器中做清理操作（避免重入 / 死锁风险）
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
         g_last_signal.store(signal);
         std::cout << "\nReceived shutdown signal, stopping..." << std::endl;
         if (auto* app = g_app_ptr.load()) {
-            app->request_stop();
+            app->request_stop();  // 仅置 running_=false，实际清理在 shutdown() 中
         }
     }
 }
@@ -305,7 +310,11 @@ void parse_extra_flags(int argc, char** argv, clink::core::ApplicationOptions& o
 
 }  // namespace
 
+// ===== 入口 =====
+// 三步启动：解析参数 → initialize（创建子系统）→ run（事件循环）
+// shutdown 由信号触发，主循环退出后自动调用
 int main(int argc, char** argv) {
+    // --help 和 --version 立即返回，不触发提权
     if (has_any_flag(argc, argv, {"-h", "--help"})) {
         print_usage();
         return 0;
@@ -316,6 +325,8 @@ int main(int argc, char** argv) {
     }
 
 #ifdef _WIN32
+    // 自动提权：发现不是管理员且有 VIF 需求时，通过 ShellExecuteEx runas 重启自身
+    // 提权后由 elevated 子进程执行后续逻辑，原进程退出
     if (relaunch_as_admin_if_needed(argc, argv)) {
         return 0;
     }
@@ -339,8 +350,8 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, signal_handler);
 
     try {
-        app.initialize();
-        app.run();
+        app.initialize();  // 第一步：装载配置、创建子系统、启动 IPC 和 PM
+        app.run();         // 第二步：启动模块、进入事件循环，阻塞直到 request_stop()
 
         const int signal = g_last_signal.load();
         if (signal == SIGINT) {
@@ -351,7 +362,7 @@ int main(int argc, char** argv) {
             std::cout << "Shutdown reason: normal_exit_or_external_stop" << std::endl;
         }
 
-        app.Application::shutdown(std::chrono::seconds(5));
+        app.Application::shutdown(std::chrono::seconds(5));  // 第三步：逆序关停所有子系统（5秒超时）
     } catch (const std::exception& ex) {
         std::cerr << "Service failed: " << ex.what() << std::endl;
         return 1;

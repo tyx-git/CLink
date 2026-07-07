@@ -12,9 +12,7 @@
 
 namespace clink::core::network {
 
-/**
- * @brief 虚拟网卡接口抽象，屏蔽平台差异 (Windows TAP-Windows/Wintun, Linux TUN/TAP)
- */
+// 虚拟网卡接口抽象：屏蔽 Windows Wintun 与 Linux TUN 的平台差异
 class VirtualInterface {
 public:
     virtual ~VirtualInterface() = default;
@@ -25,32 +23,15 @@ public:
      * @param address IP 地址 (如 "10.0.0.1")
      * @param netmask 子网掩码 (如 "255.255.255.0")
      */
-    virtual std::error_code open(const std::string& name, 
-                                 const std::string& address, 
-                                 const std::string& netmask) = 0;
-
-    /**
-     * @brief 关闭网卡
-     */
-    virtual void close() = 0;
-
-    /**
-     * @brief 异步读取一个原始数据包 (IP Packet)
-     * @param buffer 目标缓冲区 (Block)
-     * @param callback 读取完成后的回调
-     */
-    virtual void async_read_packet(std::shared_ptr<clink::core::memory::Block> buffer, 
-                                   std::function<void(std::error_code, size_t)> callback) = 0;
-
-    /**
-     * @brief 写入一个原始数据包 (IP Packet)
-     */
-    virtual std::error_code write_packet(const uint8_t* data, size_t size) = 0;
-
-    /**
-     * @brief 写入一个原始数据包 (Block)
-     */
-    virtual std::error_code write_packet(const clink::core::memory::Block& block) {
+    virtual std::error_code open(const std::string& name,  // 打开并配置虚拟网卡
+                                 const std::string& address,  // IP 地址
+                                 const std::string& netmask) = 0; // 子网掩码
+    virtual void close() = 0;                                          // 关闭网卡
+    virtual void async_read_packet(                                     // 异步读一个 IP 包（从虚拟网卡到隧道）
+        std::shared_ptr<clink::core::memory::Block> buffer, 
+        std::function<void(std::error_code, size_t)> callback) = 0;
+    virtual std::error_code write_packet(const uint8_t* data, size_t size) = 0; // 写入 IP 包（从隧道到虚拟网卡）
+    virtual std::error_code write_packet(const clink::core::memory::Block& block) { // Block 版本
         return write_packet(block.begin(), block.size());
     }
 
@@ -67,12 +48,8 @@ public:
     /**
      * @brief 获取接口 MTU
      */
-    virtual uint32_t mtu() const noexcept = 0;
-
-    /**
-     * @brief 获取接口名称
-     */
-    virtual std::string name() const = 0;
+    virtual uint32_t mtu() const noexcept = 0;  // 接口 MTU
+    virtual std::string name() const = 0;         // 接口名称
 };
 
 using VirtualInterfacePtr = std::unique_ptr<VirtualInterface>;

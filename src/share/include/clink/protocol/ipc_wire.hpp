@@ -4,11 +4,13 @@
 
 #include "src/share/include/clink/protocol/control_plane.hpp"
 
+// IPC 线协议：command|payload 纯文本格式
+// 分隔符为第一个 | 字符，左侧是命令名，右侧是 JSON 载荷
 namespace clink::protocol::ipc {
 
 struct WireParts {
-    std::string command;
-    std::string payload;
+    std::string command;  // 命令名，如 "connect" / "status" / "disconnect"
+    std::string payload;  // JSON 字符串载荷
 };
 
 inline std::string json_escape(const std::string& input) {
@@ -39,6 +41,7 @@ inline std::string json_escape(const std::string& input) {
     return out;
 }
 
+// 构造统一的错误信封：{"ok":false,"command":"xxx","error":"...","data":{"accepted":false,"status":"failed","reason":"...","message":"..."}}
 inline std::string build_error_payload(const std::string& command,
                                        const std::string& message,
                                        const std::string& reason = std::string{}) {
@@ -53,10 +56,12 @@ inline std::string build_error_payload(const std::string& command,
            "\",\"" + control_plane::kFieldMessage + "\":\"" + json_escape(message) + "\"}}";
 }
 
+// 组装线格式：command|payload
 inline std::string build_wire_message(const std::string& command, const std::string& payload) {
     return command + "|" + payload;
 }
 
+// 解析线格式：按第一个 | 拆分为命令和载荷
 inline WireParts parse_wire_message(const std::string& raw) {
     const auto sep = raw.find('|');
     return {sep == std::string::npos ? raw : raw.substr(0, sep),

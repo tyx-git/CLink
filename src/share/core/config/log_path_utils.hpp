@@ -3,10 +3,10 @@
 #include <string>
 #include "src/share/core/config/configuration.hpp"
 
+// 解析日志文件路径：遍历 [[logging.sinks]] 配置，返回第一个启用中的文件类 sink 的路径
+// 如果都未配置，fallback 到 default_path，再 fallback 到平台默认路径
 namespace clink::core::config {
 
-// Resolve the first enabled log file path from logging.sinks[] config.
-// Falls back to the provided default if no file sink is configured.
 inline std::string resolve_log_file_path(const Configuration& configuration,
                                          const std::string& default_path = "") {
     for (int i = 0; i < 10; ++i) {

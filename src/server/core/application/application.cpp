@@ -183,10 +183,12 @@ Application::Application(ApplicationOptions options)
     logger_->set_level(options_.log_level);
 }
 
+// ===== 初始化阶段 =====
+// 严格按依赖顺序创建各子系统。三步幂等——compare_exchange 防止重复进入
 void Application::initialize() {
     bool expected = false;
     if (!initialized_.compare_exchange_strong(expected, true)) {
-        return;
+        return;  // 已初始化，跳过
     }
 
     log_lifecycle("initializing subsystems");
@@ -706,6 +708,10 @@ void Application::start_config_watcher_timer() {
     });
 }
 
+// ===== IPC 命令分发表 =====
+// 将收到的 IPC 命令（reload/status/connect/disconnect/monitor/diag/logs/encrypt）映射到内部操作
+// 所有非空命令都通过 invoke_on_io 序列化到 io_context 线程执行，避免并发问题
+// 10 秒超时保护——被阻塞的 IPC 请求不会永久挂起
 void Application::setup_ipc_handlers() {
     if (ipc_server_) {
         ipc_server_->set_handler([this](const ipc::Message& req) -> ipc::Message {
@@ -713,6 +719,8 @@ void Application::setup_ipc_handlers() {
 
             constexpr auto kIpcDispatchTimeout = std::chrono::seconds(10);
 
+            // invoke_on_io：将操作投递到 io_context 线程执行，避免多线程竞争
+            // 如果当前已经在 io_context 线程上，直接执行不走 post
             auto invoke_on_io = [this, kIpcDispatchTimeout]<typename Fn>(Fn&& fn) -> decltype(auto) {
                 using Result = std::invoke_result_t<Fn>;
 
@@ -749,19 +757,19 @@ void Application::setup_ipc_handlers() {
                 }
             };
 
+            // 解析 IPC 载荷中的 JSON 字符串
             auto parse_data_payload = [](const std::string& raw) -> json {
                 if (raw.empty()) {
                     return json::object();
                 }
-
                 auto parsed = json::parse(raw, nullptr, false);
                 if (!parsed.is_discarded()) {
                     return parsed;
                 }
-
                 return json(raw);
             };
 
+            // 构造成功信封：{"ok":true, "command":"xxx", "data":{...}}
             auto ok_payload = [&](const std::string& command, json data) -> std::string {
                 if (!data.is_object()) {
                     data = json{{control_plane::kFieldValue, std::move(data)}};
@@ -776,7 +784,9 @@ void Application::setup_ipc_handlers() {
                 return payload.dump();
             };
 
-            auto error_payload = [&](const std::string& command, const std::string& message, const std::string& reason = std::string{}) -> std::string {
+            // 构造失败信封：{"ok":false, "command":"xxx", "error":"...", "data":{...}}
+            auto error_payload = [&](const std::string& command, const std::string& message,
+                                     const std::string& reason = std::string{}) -> std::string {
                 json data;
                 data[control_plane::kFieldAccepted] = false;
                 data[control_plane::kFieldStatus] = control_plane::kStatusFailed;
@@ -791,6 +801,7 @@ void Application::setup_ipc_handlers() {
                 return payload.dump();
             };
 
+            // 判断 daemon 是否已就绪/正在关闭，返回对应原因码
             auto control_runtime_unavailable_reason = [&]() -> std::string {
                 return shutdown_called_.load() ? control_plane::kReasonServiceShuttingDown
                                                : control_plane::kReasonServiceNotRunning;
@@ -802,6 +813,7 @@ void Application::setup_ipc_handlers() {
             };
 
             try {
+                // ---- reload：热重载配置 ----
                 if (req.command == "reload") {
                     if (!control_runtime_ready_.load()) {
                         return control_runtime_unavailable_response("reload");
@@ -812,10 +824,12 @@ void Application::setup_ipc_handlers() {
                     data["reload"] = "ok";
                     return {ipc::MessageType::Response, "reload", ok_payload("reload", std::move(data))};
                 }
+                // ---- status：收集 daemon 状态并返回 JSON ----
                 if (req.command == "status") {
                     const auto status_payload = invoke_on_io([this]() { return get_session_status(); });
                     return {ipc::MessageType::Response, "status", ok_payload("status", parse_data_payload(status_payload))};
                 }
+                // ---- connect：发起出站连接（TLS/TCP）到远端 daemon ----
                 if (req.command == "connect") {
                     if (!control_runtime_ready_.load()) {
                         return control_runtime_unavailable_response("connect");
@@ -823,6 +837,7 @@ void Application::setup_ipc_handlers() {
                     const auto connect_result = invoke_on_io([this, payload = req.payload]() { return connect_session(payload); });
                     return {ipc::MessageType::Response, "connect", ok_payload("connect", parse_data_payload(connect_result))};
                 }
+                // ---- disconnect：断开当前会话 ----
                 if (req.command == "disconnect") {
                     if (!control_runtime_ready_.load()) {
                         return control_runtime_unavailable_response("disconnect");
@@ -848,6 +863,7 @@ void Application::setup_ipc_handlers() {
                     });
                     return {ipc::MessageType::Response, "disconnect", ok_payload("disconnect", std::move(disconnect_data))};
                 }
+                // ---- logs：读取 daemon 日志文件内容 ----
                 if (req.command == "logs") {
                     const std::string log_path = resolve_log_file_path(configuration_);
                     std::ifstream log_file(log_path, std::ios::binary);
@@ -878,6 +894,7 @@ void Application::setup_ipc_handlers() {
                                                  {control_plane::kFieldPath, log_path}})
                     };
                 }
+                // ---- 未知命令 ----
                 return {ipc::MessageType::Response, req.command,
                         error_payload(req.command, "unknown command", control_plane::kReasonUnknownCommand)};
             } catch (const std::exception& ex) {
@@ -895,6 +912,9 @@ void Application::setup_ipc_handlers() {
     }
 }
 
+// ===== 运行阶段 =====
+// 启动 Asio 事件循环到独立线程，然后主线程停留在一个心跳循环中
+// running_ = false 时退出主循环，由 shutdown() 做资源清理
 void Application::run() {
     if (!initialized_) {
         initialize();
@@ -902,7 +922,7 @@ void Application::run() {
 
     bool expected = false;
     if (!running_.compare_exchange_strong(expected, true)) {
-        return;
+        return;  // 已在运行
     }
 
     log_lifecycle("entering event loop");
@@ -912,7 +932,7 @@ void Application::run() {
         io_thread_stopped_ = false;
     }
 
-    // Start Asio I/O thread
+    // 异步 IO 在独立线程中运行，主线程不阻塞在 io_context 上
     io_thread_ = std::thread([this]() {
         logger_->info("[app] asio io_context started");
         io_context_.run();
@@ -927,20 +947,22 @@ void Application::run() {
     start_modules();
     control_runtime_ready_.store(true);
 
-    // Main event loop
+    // 主循环：以心跳间隔轮询 running_ 标志，等待 request_stop() 或信号触发退出
     while (running_.load()) {
         std::this_thread::sleep_for(options_.heartbeat_interval);
-        // We can add periodic background tasks here if needed
     }
 
     log_lifecycle("event loop exited");
-    // Modules are stopped by shutdown() to avoid duplicate stop during signal-driven shutdown.
+    // 模块在 shutdown() 中停止，不在 run() 中停——避免信号驱动的 shutdown 重复停止
 }
 
+// ===== 关停阶段 =====
+// 逆序关停：IPC → PM → 模块 → SessionManager → IO 线程
+// compare_exchange 防止重复关停；timeout 控制 IO 线程等待上限
 void Application::shutdown(std::chrono::milliseconds timeout) {
     bool expected_shutdown = false;
     if (!shutdown_called_.compare_exchange_strong(expected_shutdown, true)) {
-        return; // already shut down (or shutting down)
+        return; // 已在关停中
     }
 
     if (!initialized_) {

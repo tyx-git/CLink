@@ -261,7 +261,7 @@ std::error_code TcpTransportListener::listen(const std::string& endpoint) {
     if (running_) return {};
 
     listen_endpoint_ = endpoint;
-    
+
     // Parse endpoint
     std::string ip;
     int port = 0;
@@ -269,7 +269,8 @@ std::error_code TcpTransportListener::listen(const std::string& endpoint) {
         return std::make_error_code(std::errc::invalid_argument);
     }
 
-    asio::ip::tcp::endpoint asio_endpoint(asio::ip::make_address(ip), static_cast<unsigned short>(port));
+    const auto configured_address = asio::ip::make_address(ip);
+    asio::ip::tcp::endpoint asio_endpoint(configured_address, static_cast<unsigned short>(port));
 
     std::error_code ec;
     auto close_acceptor_on_failure = [this]() {
@@ -277,27 +278,56 @@ std::error_code TcpTransportListener::listen(const std::string& endpoint) {
         acceptor_.close(ignored_ec);
     };
 
-    acceptor_.open(asio_endpoint.protocol(), ec);
-    if (ec) {
-        close_acceptor_on_failure();
+    auto try_listen = [&](const asio::ip::tcp::endpoint& candidate, bool dual_stack) {
+        acceptor_.open(candidate.protocol(), ec);
+        if (ec) {
+            close_acceptor_on_failure();
+            return ec;
+        }
+
+        acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true), ec);
+        if (ec) {
+            close_acceptor_on_failure();
+            return ec;
+        }
+
+        if (dual_stack && candidate.address().is_v6()) {
+            asio::ip::v6_only v6_only(false);
+            acceptor_.set_option(v6_only, ec);
+            if (ec) {
+                close_acceptor_on_failure();
+                return ec;
+            }
+        }
+
+        acceptor_.bind(candidate, ec);
+        if (ec) {
+            close_acceptor_on_failure();
+            return ec;
+        }
+
+        acceptor_.listen(asio::socket_base::max_listen_connections, ec);
+        if (ec) {
+            close_acceptor_on_failure();
+            return ec;
+        }
+
         return ec;
+    };
+
+    if (configured_address.is_v4() && configured_address.to_v4().is_unspecified()) {
+        const asio::ip::tcp::endpoint dual_stack_endpoint(asio::ip::tcp::v6(), static_cast<unsigned short>(port));
+        ec = try_listen(dual_stack_endpoint, true);
+        if (ec && logger_) {
+            logger_->warn("[tcp] stage=listen.dual_stack status=fallback endpoint=" + endpoint + " msg=" + ec.message());
+        }
     }
 
-    acceptor_.set_option(asio::ip::tcp::acceptor::reuse_address(true), ec);
-    if (ec) {
-        close_acceptor_on_failure();
-        return ec;
+    if (ec || !acceptor_.is_open()) {
+        ec = try_listen(asio_endpoint, false);
     }
 
-    acceptor_.bind(asio_endpoint, ec);
     if (ec) {
-        close_acceptor_on_failure();
-        return ec;
-    }
-
-    acceptor_.listen(asio::socket_base::max_listen_connections, ec);
-    if (ec) {
-        close_acceptor_on_failure();
         return ec;
     }
 
